@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wb-parser"
+version = "0.1.0"
+description = "Wildberries parser and post payload generator for Telegram channel workflow"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "alembic>=1.13.0",
+  "fastapi>=0.115.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.7.0",
+  "pydantic-settings>=2.2.0",
+  "python-dotenv>=1.0.1",
+  "pyyaml>=6.0.1",
+  "sqlalchemy>=2.0.30",
+  "typer>=0.12.3",
+  "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "black>=24.0.0",
+  "pytest>=8.2.0",
+  "respx>=0.21.1",
+  "ruff>=0.5.0",
+]
+
+[project.scripts]
+wb-parser = "app.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

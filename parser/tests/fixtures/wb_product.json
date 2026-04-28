@@ -1,0 +1,31 @@
+{
+  "id": 12345678,
+  "name": "Органайзер для косметики пастельный",
+  "brand": "Home Cozy",
+  "categoryId": 1001,
+  "categoryName": "Интерьер и декор",
+  "subjectName": "Органайзеры",
+  "salePriceU": 69900,
+  "priceU": 129900,
+  "sale": 46,
+  "reviewRating": 4.8,
+  "feedbacks": 156,
+  "ordersCount": 2100,
+  "images": [
+    "https://example.com/12345678-1.jpg",
+    "https://example.com/12345678-2.jpg",
+    "https://example.com/12345678-3.jpg",
+    "https://example.com/12345678-4.jpg"
+  ],
+  "available": true,
+  "sizes": [
+    {"name": "one size"}
+  ],
+  "colors": [
+    {"name": "pink"},
+    {"name": "white"}
+  ],
+  "supplierId": 777,
+  "supplier": "Cozy Supplier",
+  "link": "https://www.wildberries.ru/catalog/12345678/detail.aspx?targetUrl=SP"
+}

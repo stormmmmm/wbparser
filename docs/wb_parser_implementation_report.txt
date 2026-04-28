@@ -1,0 +1,97 @@
+ОТЧЕТ О ПРОДЕЛАННОЙ РАБОТЕ ПО WB-ПАРСЕРУ
+Дата: 2026-04-27
+Директория проекта: E:\wbchannel
+
+1) Что реализовано
+
+1. Создана структура проекта по ТЗ:
+- configs/ (categories.yml, search_queries.yml, trend_keywords.yml, scoring.yml, stop_words.yml, excluded_articles.yml)
+- data/outbox, data/inbox, data/media_cache
+- parser/ со всем исполняемым кодом, API, CLI, DB-слоем, сервисами и тестами
+
+2. Реализован backend парсера в parser/app:
+- config и загрузка YAML/ENV
+- WB async client (httpx, concurrency, retry/backoff, timeout, raw cache)
+- нормализация карточки товара в ParsedProduct
+- фильтры (hard reject + risk flags)
+- скоринг selection_score по формуле (0..100)
+- сервисы media selection, review analyzer, deduplication
+- сборка post payload (single/collection)
+- outbox export/import
+- worker/scheduler loop
+
+3. Реализована БД (SQLAlchemy):
+- модели: products, product_snapshots, selected_candidates, review_summaries, media_assets, posts, post_items, publication_metrics, click_metrics, category_rules, excluded_articles
+- session/init_db/repository слой
+- idempotent post_id генерация
+- lock/published/failed статусы
+
+4. Реализован REST API контракт (FastAPI):
+- GET /health
+- GET /api/v1/posts/next
+- POST /api/v1/posts/{post_id}/lock
+- POST /api/v1/posts/{post_id}/published
+- POST /api/v1/posts/{post_id}/failed
+- POST /api/v1/posts/{post_id}/metrics
+- POST /api/v1/clicks
+- GET /api/v1/products/{article_id}
+
+5. Реализован CLI (Typer):
+- wb-parser init-db
+- wb-parser collect
+- wb-parser refresh
+- wb-parser score
+- wb-parser build-posts
+- wb-parser export-ready
+- wb-parser import-publication-results
+- wb-parser serve
+- wb-parser worker
+
+6. Документация и окружение:
+- parser/README.md
+- parser/.env.example
+- parser/pyproject.toml
+- data/outbox/ready_posts_sample.json
+
+2) Что учтено из анализа канала/логики
+
+- Центральность article_id для CTA и идентификации
+- Фокус на визуально сильных категориях и аудитории канала
+- Короткий формат текстов поста
+- Выделение price/old_price/discount/rating/feedbacks как сигналов качества
+- Пороговая логика selection_score (ready / needs_review / rejected)
+- Ограничение повторов через cooldown
+- Контракт ReadyPost для отдельного postинг-скрипта
+
+3) Тестирование
+
+Добавлены и выполнены тесты:
+- parser/tests/test_normalize_product.py
+- parser/tests/test_filters.py
+- parser/tests/test_scoring.py
+- parser/tests/test_post_builder.py
+- parser/tests/test_api_contract.py
+
+Результат запуска:
+- 6 passed
+
+Команда:
+- python -m pytest -q
+
+4) Важные замечания
+
+- Используется SQLite по умолчанию, PostgreSQL подключается через DATABASE_URL.
+- Реализован минимальный production-friendly вертикальный срез с возможностью расширения.
+- Встроены fallback-пути и логирование ошибок, чтобы один невалидный товар не падал весь pipeline.
+
+5) Основные созданные пути
+
+- E:\wbchannel\parser\app\api\main.py
+- E:\wbchannel\parser\app\cli.py
+- E:\wbchannel\parser\app\clients\wildberries.py
+- E:\wbchannel\parser\app\services\normalize_product.py
+- E:\wbchannel\parser\app\services\filter_products.py
+- E:\wbchannel\parser\app\services\score_products.py
+- E:\wbchannel\parser\app\services\post_builder.py
+- E:\wbchannel\parser\app\db\models.py
+- E:\wbchannel\parser\tests\test_api_contract.py

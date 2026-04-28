@@ -1,0 +1,52 @@
+{
+  "post_id": "sample-collection-1",
+  "post_type": "collection",
+  "title": "Подборка для уютной комнаты",
+  "text": "Подборка для уютной комнаты\n\n1. 12345678 - 699 ₽ / органайзер в пастельном цвете\n2. 23456789 - 890 ₽ / милый ночник с мягким светом\n3. 34567890 - 459 ₽ / набор свечей для атмосферы\n\n(клик по артикулу, чтобы перейти на товар)",
+  "parse_mode": null,
+  "media": [
+    {
+      "position": 1,
+      "article_id": "12345678",
+      "url": "https://example.com/media/12345678-1.jpg",
+      "local_path": null,
+      "type": "photo",
+      "caption": null
+    }
+  ],
+  "items": [
+    {
+      "position": 1,
+      "article_id": "12345678",
+      "title": "Органайзер для косметики",
+      "short_title": "Органайзер",
+      "price": 699,
+      "old_price": 1199,
+      "discount_percent": 41,
+      "rating": 4.8,
+      "feedbacks_count": 156,
+      "displayed_url": "https://www.wildberries.ru/catalog/12345678/detail.aspx",
+      "canonical_url": "https://www.wildberries.ru/catalog/12345678/detail.aspx",
+      "affiliate_url": null,
+      "main_image_url": "https://example.com/media/12345678-1.jpg",
+      "reason_for_selection": "пастельный органайзер, до 700 ₽, подходит для комнаты/косметики",
+      "risk_flags": []
+    }
+  ],
+  "buttons": [
+    {
+      "text": "Открыть товар 1",
+      "url": "https://www.wildberries.ru/catalog/12345678/detail.aspx"
+    }
+  ],
+  "reactions_hint": {
+    "enabled": true,
+    "text": "Да - ❤️     Нет - 🔥"
+  },
+  "planned_at": null,
+  "fresh_until": "2026-04-27T21:00:00Z",
+  "publication_status": "ready",
+  "created_at": "2026-04-27T20:45:00Z",
+  "source": "wb_parser",
+  "version": "1"
+}
