@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from app import __version__
+from app.api.routes_admin import router as admin_router
 from app.api.routes_health import router as health_router
 from app.api.routes_metrics import router as metrics_router
 from app.api.routes_posts import router as posts_router
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
     app.include_router(products_router)
     app.include_router(metrics_router)
     app.include_router(webhooks_maxapi_router)
+    app.include_router(admin_router)
     return app
 
 

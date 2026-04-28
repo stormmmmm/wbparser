@@ -19,46 +19,51 @@ class PostBuilderService:
         self.media_selector = MediaSelectorService(settings)
 
     def _single_title(self, product: Product) -> str:
-        if product.category_name:
-            return f"{short_title(product.title, 50)}"
-        return "Находка дня с Wildberries"
+        # Following channel_analysis_report.txt schema "В": эмоциональное прилагательное + товар.
+        base = short_title(product.title, 48) if product.title else "Находка дня с Wildberries"
+        return f"{base} 😍"
 
     def _single_text(self, product: Product, candidate: SelectedCandidate) -> str:
-        line1 = candidate.reason_for_selection or "красивая и практичная находка"
-        line2 = (
+        adv1 = candidate.reason_for_selection or "красивая и практичная находка"
+        adv2 = (
             f"рейтинг {product.rating:.1f} и {product.feedbacks_count} отзывов"
             if product.rating and product.feedbacks_count
-            else "похожа на удачную покупку по отзывам"
+            else "хорошие отзывы покупателей"
         )
         price_line = f"{product.current_price} ₽" if product.current_price else "цена уточняется"
         if product.old_price and product.discount_percent:
-            line3 = f"сейчас {price_line}, было {product.old_price} ₽ (-{product.discount_percent}%)"
+            adv3 = f"сейчас {price_line}, было {product.old_price} ₽ (-{product.discount_percent}%)"
         else:
-            line3 = f"цена: {price_line}"
+            adv3 = f"цена {price_line}"
         return (
             f"{self._single_title(product)}\n\n"
-            f"❤️ {line1}\n"
-            f"❤️ {line2}\n"
-            f"❤️ {line3}\n\n"
-            f"{product.article_id} - {price_line}\n"
-            "(клик по артикулу, чтобы перейти на товар)"
+            f"❤️ {adv1}\n"
+            f"❤️ {adv2}\n"
+            f"❤️ {adv3}\n\n"
+            f"{product.article_id} — {price_line}\n"
+            "(клик по артикулу, чтобы перейти на товар)\n\n"
+            "Нашла на Wildberries ❤️"
         )
 
     def _collection_title(self, products: list[Product]) -> str:
         category = next((p.category_name for p in products if p.category_name), None)
         if category:
-            return f"Подборка: {category}"
-        return "Подборка находок с Wildberries"
+            return f"Подборка: {category} 😍"
+        return "Подборка находок с Wildberries 😍"
 
     def _collection_text(self, rows: list[tuple[SelectedCandidate, Product]]) -> str:
+        # Channel-style: short emotional title + per-line "артикул — цена" + reaction poll + signature.
         title = self._collection_title([row[1] for row in rows])
         lines = [title, ""]
-        for idx, (candidate, product) in enumerate(rows, start=1):
+        for _, product in rows:
             price = f"{product.current_price} ₽" if product.current_price else "цена уточняется"
-            reason = candidate.reason_for_selection or short_title(product.title, 42)
-            lines.append(f"{idx}. {product.article_id} - {price} / {reason}")
+            lines.append(f"{product.article_id} — {price}")
         lines.append("")
         lines.append("(клик по артикулу, чтобы перейти на товар)")
+        lines.append("")
+        lines.append("Нравится подборка?")
+        lines.append("Да - ❤️     Нет - 🔥")
+        lines.append("Нашла на Wildberries ❤️")
         return "\n".join(lines)
 
     def _build_media(self, rows: list[tuple[SelectedCandidate, Product]]) -> list[dict]:

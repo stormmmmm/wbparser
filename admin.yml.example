@@ -1,0 +1,58 @@
+# wbpost admin config — единственная точка настройки авто-постинга.
+# Скопируйте в admin.yml и поправьте под себя:
+#   cp admin.yml.example admin.yml
+#
+# Все значения можно также переопределить переменными окружения вида
+# WBPOST_<UPPER_PATH> (например WBPOST_MAX__PHONE).
+
+max:
+  # Номер MAX-аккаунта, от которого будет идти постинг.
+  # Можно оставить пустым — тогда возьмётся из переменной окружения PHONE_NUMBER.
+  phone: ""
+  # Название MAX-канала (как отображается в приложении).
+  # wbpost login сам найдёт канал по этому имени через API maxapi.
+  channel_name: "Поищи на WB"
+  # Подпись устройства (видна в списке сессий MAX).
+  device_name: "wbpost-bridge"
+  # Опциональный 2FA-пароль аккаунта. Обычно не нужен — оставить пустым.
+  two_factor_password: ""
+
+schedule:
+  # Таймзона расписания. По умолчанию Москва.
+  timezone: "Europe/Moscow"
+  # Включить ежедневный авто-планировщик. Если false — посты публикуются
+  # только командой `wbpost post-once`.
+  enabled: true
+  # Сетка слотов на каждый день. type=single|collection;
+  # with_reaction_poll=true добавляет «Нравится подборка? Да-❤️ Нет-🔥» к коллекции.
+  slots:
+    - time: "10:00"
+      type: "collection"
+      with_reaction_poll: false
+    - time: "12:00"
+      type: "single"
+    - time: "14:00"
+      type: "collection"
+      with_reaction_poll: true
+    - time: "16:00"
+      type: "collection"
+      with_reaction_poll: false
+    - time: "19:00"
+      type: "single"
+
+content:
+  # Хард-блок категорий БАД/витамины и медицинских обещаний.
+  # Соответствует пожеланию channel_analysis_report.txt §10.
+  block_supplements_and_medical: true
+  # Партнёрские (аффилиатные) ссылки. Если enabled=true и base_url задан,
+  # parser будет оборачивать canonical_url в base_url?url=... .
+  affiliate:
+    enabled: true
+    base_url: ""
+
+deployment:
+  # URL'ы сервисов. В docker-compose оставьте дефолты.
+  parser_url: "http://parser:8000"
+  maxapi_url: "http://maxapi:8080"
+  # Путь к файлу состояния (acc_id/channel_id, заполняется командой wbpost login).
+  state_path: "data/admin_state.json"

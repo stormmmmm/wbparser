@@ -54,3 +54,12 @@ data/raw_cache/*
 # maxapi PyMax session/work directories (per-account session.db etc.)
 maxapi-data/
 .maxapi-data/
+data/maxapi/
+
+# Admin state written by `wbpost login` — contains account_id/channel_id.
+# Ok to keep locally but never commit it.
+data/admin_state.json
+
+# Admin config (per-deployment secrets / phone). Commit only the example.
+admin.yml
+!admin.yml.example

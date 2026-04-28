@@ -9,7 +9,7 @@ import signal
 import httpx
 import typer
 
-from bridge.config import BridgeSettings, load_settings
+from bridge.config import BridgeSettings, load_settings, resolve_account_and_channel
 from bridge.maxapi_client import MaxApiClient
 from bridge.parser_client import ParserClient
 from bridge.worker import run_loop, run_once
@@ -24,15 +24,19 @@ def _configure_logging(level: str) -> None:
     )
 
 
-def _require_targets(settings: BridgeSettings) -> None:
-    if not settings.maxapi_account_id:
+def _resolve_targets(settings: BridgeSettings) -> tuple[str, str]:
+    account_id, channel_id = resolve_account_and_channel(settings)
+    if not account_id:
         raise typer.BadParameter(
-            "WBBRIDGE_MAXAPI_ACCOUNT_ID is required (the MAX account that publishes)."
+            "MAX account id is missing — set WBBRIDGE_MAXAPI_ACCOUNT_ID "
+            "or run `wbpost login` so admin_state.json is populated."
         )
-    if not settings.maxapi_channel_id:
+    if not channel_id:
         raise typer.BadParameter(
-            "WBBRIDGE_MAXAPI_CHANNEL_ID is required (the MAX channel to publish into)."
+            "MAX channel id is missing — set WBBRIDGE_MAXAPI_CHANNEL_ID "
+            "or run `wbpost login` so admin_state.json is populated."
         )
+    return account_id, channel_id
 
 
 def _build_clients(settings: BridgeSettings) -> tuple[
@@ -61,7 +65,7 @@ def cmd_run_once(
 
     settings = load_settings()
     _configure_logging(settings.log_level)
-    _require_targets(settings)
+    account_id, channel_id = _resolve_targets(settings)
 
     async def _main() -> list[str]:
         parser_http, maxapi_http, parser, maxapi = _build_clients(settings)
@@ -69,8 +73,8 @@ def cmd_run_once(
             return await run_once(
                 parser=parser,
                 maxapi=maxapi,
-                account_id=settings.maxapi_account_id,
-                channel_id=settings.maxapi_channel_id,
+                account_id=account_id,
+                channel_id=channel_id,
                 worker_id=settings.worker_id,
                 lock_ttl_seconds=settings.lock_ttl_seconds,
                 batch_size=settings.batch_size,
@@ -90,7 +94,7 @@ def cmd_run_loop() -> None:
 
     settings = load_settings()
     _configure_logging(settings.log_level)
-    _require_targets(settings)
+    account_id, channel_id = _resolve_targets(settings)
 
     async def _main() -> None:
         parser_http, maxapi_http, parser, maxapi = _build_clients(settings)
@@ -108,8 +112,8 @@ def cmd_run_loop() -> None:
             await run_loop(
                 parser=parser,
                 maxapi=maxapi,
-                account_id=settings.maxapi_account_id,
-                channel_id=settings.maxapi_channel_id,
+                account_id=account_id,
+                channel_id=channel_id,
                 worker_id=settings.worker_id,
                 lock_ttl_seconds=settings.lock_ttl_seconds,
                 batch_size=settings.batch_size,

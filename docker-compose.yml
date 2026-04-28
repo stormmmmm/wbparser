@@ -1,9 +1,10 @@
-# Local development orchestration for parser + maxapi + bridge.
+# Local development orchestration for parser + maxapi + bridge + wbpost.
 #
 # Usage:
 #   docker compose up --build
 #
 # Override secrets / channel ids in a `.env` file at the repo root.
+# Admin config lives in `admin.yml` (copy from admin.yml.example).
 
 services:
   parser:
@@ -17,6 +18,8 @@ services:
       INBOX_PUBLICATION_RESULTS_PATH: /data/inbox/publication_results.jsonl
       MEDIA_CACHE_DIR: /data/media_cache
       RAW_CACHE_DIR: /data/raw_cache
+      AFFILIATE_ENABLED: ${AFFILIATE_ENABLED:-false}
+      AFFILIATE_BASE_URL: ${AFFILIATE_BASE_URL:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MAXAPI_WEBHOOK_SECRET: ${MAXAPI_WEBHOOK_SECRET:-}
     volumes:
@@ -39,8 +42,13 @@ services:
       MAXAPI_HOST: 0.0.0.0
       MAXAPI_PORT: "8080"
       MAXAPI_TOKEN: ${MAXAPI_TOKEN:-dev-token}
-      MAXAPI_BACKEND: ${MAXAPI_BACKEND:-memory}
+      MAXAPI_BACKEND: ${MAXAPI_BACKEND:-pymax}
+      MAXAPI_PYMAX_WORK_DIR: /data/maxapi
       MAXAPI_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # Bind-mount ./data so PyMax sessions persist on host disk and
+      # `wbpost login` can copy/move them between machines if needed.
+      - ./data:/data
     ports:
       - "8080:8080"
     healthcheck:
@@ -58,17 +66,52 @@ services:
       WBBRIDGE_PARSER_BASE_URL: http://parser:8000
       WBBRIDGE_MAXAPI_BASE_URL: http://maxapi:8080
       WBBRIDGE_MAXAPI_TOKEN: ${MAXAPI_TOKEN:-dev-token}
-      WBBRIDGE_MAXAPI_ACCOUNT_ID: ${MAXAPI_ACCOUNT_ID:-acc_DEMO0000000000000000000000}
-      WBBRIDGE_MAXAPI_CHANNEL_ID: ${MAXAPI_CHANNEL_ID:--1001111111111}
+      # Empty by default — bridge will pick ids from /data/admin_state.json
+      # written by `wbpost login`.
+      WBBRIDGE_MAXAPI_ACCOUNT_ID: ${MAXAPI_ACCOUNT_ID:-}
+      WBBRIDGE_MAXAPI_CHANNEL_ID: ${MAXAPI_CHANNEL_ID:-}
+      WBBRIDGE_ADMIN_STATE_PATH: /data/admin_state.json
       WBBRIDGE_WORKER_ID: ${WBBRIDGE_WORKER_ID:-wb-bridge-1}
       WBBRIDGE_LOCK_TTL_SECONDS: ${WBBRIDGE_LOCK_TTL_SECONDS:-600}
       WBBRIDGE_BATCH_SIZE: ${WBBRIDGE_BATCH_SIZE:-1}
       WBBRIDGE_POLL_INTERVAL_SECONDS: ${WBBRIDGE_POLL_INTERVAL_SECONDS:-15}
       WBBRIDGE_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # Bind-mount ./data so `wbpost login` (running on the host) writes
+      # admin_state.json into a place the bridge can read.
+      - ./data:/data
     depends_on:
       parser:
         condition: service_healthy
       maxapi:
+        condition: service_healthy
+    restart: unless-stopped
+
+  scheduler:
+    # Daily cron-like driver: at 04:00 Europe/Moscow it triggers the parser
+    # admin daily-cycle endpoint (collect → score → build → plan-day).
+    image: alpine:3.20
+    environment:
+      TZ: ${SCHEDULER_TZ:-Europe/Moscow}
+      DAILY_CYCLE_HOUR: ${DAILY_CYCLE_HOUR:-04}
+      DAILY_CYCLE_MINUTE: ${DAILY_CYCLE_MINUTE:-00}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache curl tzdata >/dev/null;
+        echo "scheduler: daily cycle at ${DAILY_CYCLE_HOUR}:${DAILY_CYCLE_MINUTE} ${TZ}";
+        while true; do
+          NOW_HM=$$(date +%H%M);
+          TARGET=$${DAILY_CYCLE_HOUR}$${DAILY_CYCLE_MINUTE};
+          if [ "$$NOW_HM" = "$$TARGET" ]; then
+            echo "scheduler: triggering daily-cycle at $$NOW_HM";
+            curl -fsS -X POST -H "Content-Type: application/json" -d '{}' http://parser:8000/api/v1/admin/daily-cycle || echo "scheduler: daily-cycle failed (will retry tomorrow)";
+            sleep 60;
+          fi;
+          sleep 30;
+        done
+    depends_on:
+      parser:
         condition: service_healthy
     restart: unless-stopped
 

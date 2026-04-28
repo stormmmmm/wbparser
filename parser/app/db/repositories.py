@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -266,12 +266,45 @@ class Repository:
             and_(
                 Post.publication_status == "ready",
                 Post.fresh_until >= now,
+                or_(Post.planned_at.is_(None), Post.planned_at <= now),
+            )
+        )
+        if post_type:
+            stmt = stmt.where(Post.post_type == post_type)
+        # Posts with an explicit planned_at run earliest first; unplanned posts
+        # fall back to creation order.
+        stmt = stmt.order_by(Post.planned_at.asc().nulls_last(), Post.created_at.asc()).limit(limit)
+        return list(session.scalars(stmt))
+
+    @staticmethod
+    def list_unplanned_ready_posts(
+        session: Session,
+        post_type: str | None = None,
+        limit: int = 50,
+    ) -> list[Post]:
+        """Posts ready to be assigned a slot (status=ready, planned_at IS NULL)."""
+        now = utcnow()
+        stmt = select(Post).where(
+            and_(
+                Post.publication_status == "ready",
+                Post.fresh_until >= now,
+                Post.planned_at.is_(None),
             )
         )
         if post_type:
             stmt = stmt.where(Post.post_type == post_type)
         stmt = stmt.order_by(Post.created_at.asc()).limit(limit)
         return list(session.scalars(stmt))
+
+    @staticmethod
+    def assign_planned_at(session: Session, post_id: str, planned_at) -> Post | None:
+        post = Repository.get_post(session, post_id)
+        if post is None:
+            return None
+        post.planned_at = planned_at
+        post.updated_at = utcnow()
+        session.flush()
+        return post
 
     @staticmethod
     def get_post(session: Session, post_id: str | int) -> Post | None:
