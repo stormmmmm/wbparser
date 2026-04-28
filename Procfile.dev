@@ -1,0 +1,13 @@
+# Run all three services with honcho/foreman if you prefer not using
+# Docker for local development:
+#
+#   pip install honcho
+#   cp .env.example .env
+#   honcho start -f Procfile.dev
+#
+# Each command assumes you have already created the per-package venv
+# (see parser/README.md, maxapi/README.md, bridge/README.md).
+
+parser:  cd parser && .venv/bin/uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+maxapi:  cd maxapi && .venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8080
+bridge:  cd bridge && .venv/bin/wb-bridge run-loop

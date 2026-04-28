@@ -1,0 +1,76 @@
+# Local development orchestration for parser + maxapi + bridge.
+#
+# Usage:
+#   docker compose up --build
+#
+# Override secrets / channel ids in a `.env` file at the repo root.
+
+services:
+  parser:
+    build:
+      context: .
+      dockerfile: parser/Dockerfile
+    image: wbparser/parser:dev
+    environment:
+      DATABASE_URL: sqlite:////data/wb_parser.db
+      OUTBOX_PATH: /data/outbox/ready_posts.jsonl
+      INBOX_PUBLICATION_RESULTS_PATH: /data/inbox/publication_results.jsonl
+      MEDIA_CACHE_DIR: /data/media_cache
+      RAW_CACHE_DIR: /data/raw_cache
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MAXAPI_WEBHOOK_SECRET: ${MAXAPI_WEBHOOK_SECRET:-}
+    volumes:
+      - parser-data:/data
+      - ./configs:/app/configs:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/health\").status==200 else 1)'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  maxapi:
+    build:
+      context: .
+      dockerfile: maxapi/Dockerfile
+    image: wbparser/maxapi:dev
+    environment:
+      MAXAPI_HOST: 0.0.0.0
+      MAXAPI_PORT: "8080"
+      MAXAPI_TOKEN: ${MAXAPI_TOKEN:-dev-token}
+      MAXAPI_BACKEND: ${MAXAPI_BACKEND:-memory}
+      MAXAPI_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8080/health\").status==200 else 1)'"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  bridge:
+    build:
+      context: .
+      dockerfile: bridge/Dockerfile
+    image: wbparser/bridge:dev
+    environment:
+      WBBRIDGE_PARSER_BASE_URL: http://parser:8000
+      WBBRIDGE_MAXAPI_BASE_URL: http://maxapi:8080
+      WBBRIDGE_MAXAPI_TOKEN: ${MAXAPI_TOKEN:-dev-token}
+      WBBRIDGE_MAXAPI_ACCOUNT_ID: ${MAXAPI_ACCOUNT_ID:-acc_DEMO0000000000000000000000}
+      WBBRIDGE_MAXAPI_CHANNEL_ID: ${MAXAPI_CHANNEL_ID:--1001111111111}
+      WBBRIDGE_WORKER_ID: ${WBBRIDGE_WORKER_ID:-wb-bridge-1}
+      WBBRIDGE_LOCK_TTL_SECONDS: ${WBBRIDGE_LOCK_TTL_SECONDS:-600}
+      WBBRIDGE_BATCH_SIZE: ${WBBRIDGE_BATCH_SIZE:-1}
+      WBBRIDGE_POLL_INTERVAL_SECONDS: ${WBBRIDGE_POLL_INTERVAL_SECONDS:-15}
+      WBBRIDGE_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      parser:
+        condition: service_healthy
+      maxapi:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  parser-data:

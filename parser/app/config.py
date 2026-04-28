@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     VERSION: str = "1"
 
+    MAXAPI_WEBHOOK_SECRET: str = ""
+
     BASE_DIR: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[2])
 
     @property
