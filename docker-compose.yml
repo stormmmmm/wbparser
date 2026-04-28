@@ -22,6 +22,11 @@ services:
       AFFILIATE_BASE_URL: ${AFFILIATE_BASE_URL:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       MAXAPI_WEBHOOK_SECRET: ${MAXAPI_WEBHOOK_SECRET:-}
+      # Optional RU-egress proxy for Wildberries (search.wb.ru, basket.wbbasket.ru).
+      # Set WB_PROXY_URL in .env, e.g. http://user:pass@ru-proxy:3128
+      HTTP_PROXY: ${WB_PROXY_URL:-}
+      HTTPS_PROXY: ${WB_PROXY_URL:-}
+      NO_PROXY: ${WB_NO_PROXY:-parser,maxapi,localhost,127.0.0.1}
     volumes:
       - parser-data:/data
       - ./configs:/app/configs:ro
@@ -45,6 +50,13 @@ services:
       MAXAPI_BACKEND: ${MAXAPI_BACKEND:-pymax}
       MAXAPI_PYMAX_WORK_DIR: /data/maxapi
       MAXAPI_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Same RU-egress proxy as parser — needed when maxapi downloads WB images
+      # (basket-XX.wbbasket.ru) for media materialization. MAX itself
+      # (api.oneme.ru, ws-api.oneme.ru) is reached via the proxy too — that's
+      # fine because MAX accepts requests from any IP once the session is alive.
+      HTTP_PROXY: ${WB_PROXY_URL:-}
+      HTTPS_PROXY: ${WB_PROXY_URL:-}
+      NO_PROXY: ${WB_NO_PROXY:-parser,maxapi,localhost,127.0.0.1}
     volumes:
       # Bind-mount ./data so PyMax sessions persist on host disk and
       # `wbpost login` can copy/move them between machines if needed.

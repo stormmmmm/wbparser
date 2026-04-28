@@ -97,7 +97,10 @@ class MaxApiClient:
         self._raise_for(resp)
         data = resp.json()
         account = data.get("account", data)
-        return VerifyLoginResult(account_id=account["id"], phone=account.get("phone"))
+        # Real maxapi uses `account_id` + `phone_masked`; memory backend may emit `id`.
+        account_id = account.get("account_id") or account.get("id")
+        phone = account.get("phone") or account.get("phone_masked")
+        return VerifyLoginResult(account_id=account_id, phone=phone)
 
     def list_accounts(self) -> list[dict[str, Any]]:
         resp = self._client.get("/v1/accounts")
@@ -128,8 +131,9 @@ class MaxApiClient:
         self._raise_for(resp)
         data = resp.json()
         permissions = data.get("permissions") or {}
+        channel_id = data.get("channel_id") or data.get("id")
         return FoundChannel(
-            id=data["id"],
+            id=channel_id,
             title=data.get("title", title),
             can_publish=bool(permissions.get("can_publish", True)),
         )

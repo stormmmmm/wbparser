@@ -63,9 +63,16 @@ def _find_existing_account(client: MaxApiClient, phone: str) -> str | None:
         return None
     digits = "".join(ch for ch in phone if ch.isdigit())
     for acc in accounts:
-        acc_phone = "".join(ch for ch in (acc.get("phone") or "") if ch.isdigit())
-        if acc_phone and acc_phone == digits:
-            return acc.get("id")
+        raw_phone = acc.get("phone") or acc.get("phone_masked") or ""
+        # `phone_masked` looks like `+7******5114` — drop everything but digits and
+        # match the last 4–6 digits as a fingerprint of the number.
+        acc_digits = "".join(ch for ch in raw_phone if ch.isdigit())
+        if not acc_digits:
+            continue
+        if acc_digits == digits or (
+            len(acc_digits) >= 4 and digits.endswith(acc_digits[-4:])
+        ):
+            return acc.get("account_id") or acc.get("id")
     return None
 
 
