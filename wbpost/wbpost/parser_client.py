@@ -42,6 +42,7 @@ class ParserClient:
         )
 
     def health(self) -> dict[str, Any]:
+        # WB parser exposes /api/v1/health and /health (legacy alias).
         resp = self._client.get("/health")
         self._raise_for(resp)
         return resp.json()

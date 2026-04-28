@@ -32,7 +32,7 @@ def _no_existing_account(route: respx.Route) -> None:
 @respx.mock
 def test_login_full_flow_writes_state(tmp_path):
     cfg = _cfg(tmp_path)
-    respx.get(f"{BASE}/v1/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
+    respx.get(f"{BASE}/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
     _no_existing_account(respx.get(f"{BASE}/v1/accounts"))
     respx.post(f"{BASE}/v1/accounts/login/start").mock(
         return_value=httpx.Response(202, json={"challenge_id": "chg_123"})
@@ -65,7 +65,7 @@ def test_login_full_flow_writes_state(tmp_path):
 @respx.mock
 def test_login_reuses_existing_account_without_sms(tmp_path):
     cfg = _cfg(tmp_path)
-    respx.get(f"{BASE}/v1/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
+    respx.get(f"{BASE}/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
     respx.get(f"{BASE}/v1/accounts").mock(
         return_value=httpx.Response(
             200,
@@ -93,7 +93,7 @@ def test_login_reuses_existing_account_without_sms(tmp_path):
 @respx.mock
 def test_login_force_starts_sms_even_when_account_exists(tmp_path):
     cfg = _cfg(tmp_path)
-    respx.get(f"{BASE}/v1/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
+    respx.get(f"{BASE}/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
     respx.get(f"{BASE}/v1/accounts").mock(
         return_value=httpx.Response(
             200,

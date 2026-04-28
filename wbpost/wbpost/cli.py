@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import typer
 
 from .config import AdminConfig, find_admin_config_path, load_admin_config
-from .login import login_and_resolve_channel
+from .login import (
+    DEFAULT_MAXAPI_TOKEN_ENV,
+    DEFAULT_MAXAPI_TOKEN_FALLBACK,
+    login_and_resolve_channel,
+)
 from .maxapi_client import MaxApiClient, MaxApiError
 from .parser_client import ParserClient, ParserError
 from .state import load_state, state_path_from
+
+
+def _maxapi_api_key() -> str:
+    return os.environ.get(DEFAULT_MAXAPI_TOKEN_ENV) or DEFAULT_MAXAPI_TOKEN_FALLBACK
 
 app = typer.Typer(add_completion=False, help="wbpost — admin CLI for the WB → MAX auto-poster")
 
@@ -81,7 +90,7 @@ def status_cmd(
     }
 
     try:
-        with MaxApiClient(cfg.deployment.maxapi_url) as client:
+        with MaxApiClient(cfg.deployment.maxapi_url, api_key=_maxapi_api_key()) as client:
             payload["maxapi_health"] = client.health()
     except Exception as exc:  # noqa: BLE001 - status command is best-effort
         payload["maxapi_health_error"] = str(exc)

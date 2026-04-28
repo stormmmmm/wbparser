@@ -11,6 +11,9 @@ from .config import AdminConfig
 from .maxapi_client import MaxApiClient
 from .state import AdminState, save_state
 
+DEFAULT_MAXAPI_TOKEN_ENV = "WBPOST_MAXAPI_TOKEN"
+DEFAULT_MAXAPI_TOKEN_FALLBACK = "dev-token"
+
 
 class CodePrompter(Protocol):
     def __call__(self, message: str) -> str:  # pragma: no cover - typing only
@@ -83,8 +86,9 @@ def login_and_resolve_channel(
 
     prompt = prompter or get_default_prompter()
     reused = False
+    api_key = os.environ.get(DEFAULT_MAXAPI_TOKEN_ENV) or DEFAULT_MAXAPI_TOKEN_FALLBACK
 
-    with MaxApiClient(config.deployment.maxapi_url) as client:
+    with MaxApiClient(config.deployment.maxapi_url, api_key=api_key) as client:
         client.health()  # fail fast if gateway is down
 
         account_id: str | None = None

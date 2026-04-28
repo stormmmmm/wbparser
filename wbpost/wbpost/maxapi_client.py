@@ -40,7 +40,7 @@ class MaxApiClient:
         self.base_url = base_url.rstrip("/")
         headers: dict[str, str] = {"Accept": "application/json"}
         if api_key:
-            headers["X-API-Key"] = api_key
+            headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.Client(base_url=self.base_url, headers=headers, timeout=timeout)
 
     def close(self) -> None:
@@ -66,7 +66,7 @@ class MaxApiClient:
         )
 
     def health(self) -> dict[str, Any]:
-        resp = self._client.get("/v1/health")
+        resp = self._client.get("/health")
         self._raise_for(resp)
         return resp.json()
 
