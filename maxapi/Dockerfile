@@ -12,7 +12,7 @@ COPY maxapi/README.md /app/maxapi/README.md
 COPY maxapi/api /app/maxapi/api
 COPY maxapi/openapi.yml /app/maxapi/openapi.yml
 
-RUN pip install /app/maxapi
+RUN pip install "/app/maxapi[pymax]"
 
 EXPOSE 8080
 
