@@ -87,6 +87,28 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  wbpost:
+    # On-demand admin CLI — invoke via:
+    #   docker compose run --rm wbpost login
+    #   docker compose run --rm wbpost status
+    # The container shares the same ./data volume as bridge so the state file
+    # written by `wbpost login` is visible to the bridge worker immediately.
+    build:
+      context: .
+      dockerfile: wbpost/Dockerfile
+    image: wbparser/wbpost:dev
+    profiles: ["tools"]
+    environment:
+      WBPOST_DEPLOYMENT__MAXAPI_URL: http://maxapi:8080
+      WBPOST_DEPLOYMENT__PARSER_URL: http://parser:8000
+      WBPOST_DEPLOYMENT__STATE_PATH: /workspace/data/admin_state.json
+      PHONE_NUMBER: ${PHONE_NUMBER:-}
+    volumes:
+      - .:/workspace:rw
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+
   scheduler:
     # Daily cron-like driver: at 04:00 Europe/Moscow it triggers the parser
     # admin daily-cycle endpoint (collect → score → build → plan-day).
