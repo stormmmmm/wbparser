@@ -1,22 +1,18 @@
 # wbparser — экосистема WB-канала
 
-Этот репозиторий объединяет два независимых сервиса в одну экосистему
-для автоматического ведения канала «находки на Wildberries» в
-мессенджере [MAX](https://max.ru):
+Этот репозиторий объединяет три сервиса в одну экосистему для
+автоматического ведения канала «находки на Wildberries» в мессенджере
+[MAX](https://max.ru):
 
 | Подсистема | Каталог | Что делает | Default port |
 | --- | --- | --- | --- |
 | **WB Parser** | [`parser/`](./parser/) | Собирает товары с Wildberries, фильтрует, считает `selection_score`, упаковывает их в `ReadyPost` payload. **Сам в MAX не публикует.** | `8000` |
 | **MAX Gateway** | [`maxapi/`](./maxapi/) | REST-обвязка вокруг авторизованного userbot-аккаунта MAX (через [`maxapi-python`](https://github.com/MaxApiTeam/PyMax)). Принимает `ReadyPost` и публикует пост в канал. **Сам Wildberries не парсит.** | `8080` |
+| **Bridge worker** | [`bridge/`](./bridge/) | Маленький воркер, который опрашивает parser, берёт `ReadyPost`, отдаёт его gateway'ю и репортит результат обратно. **Никакой бизнес-логики.** | — |
 
 Контракт между ними — общий объект `ReadyPost`. План связки и точки
 соединения подробно описаны в
 [`docs/integration_plan.md`](./docs/integration_plan.md).
-
-> На этом этапе репозиторий содержит только **подготовку** двух
-> инструментов к объединению. Сам код связки (poster / bridge worker,
-> материализация медиа, перевод схем) — следующий шаг и здесь не
-> реализуется.
 
 ---
 
@@ -47,16 +43,28 @@
 ├── parser/                         <- WB Parser (изолированный пакет)
 │   ├── app/                        <- API, CLI, services, db, schemas
 │   ├── tests/
+│   ├── Dockerfile
 │   ├── pyproject.toml
 │   ├── README.md
 │   └── .env.example
-└── maxapi/                         <- MAX userbot SDK + REST gateway
-    ├── api/                        <- backends, routers, models, storage
-    ├── tests/
-    ├── openapi.yml                 <- авторитетный OpenAPI gateway'я
-    ├── pyproject.toml
-    ├── README.md
-    └── images.jpg                  <- маленькая фикстура для SDK quickstart
+├── maxapi/                         <- MAX userbot SDK + REST gateway
+│   ├── api/                        <- backends, routers, models, storage
+│   ├── tests/
+│   ├── openapi.yml                 <- авторитетный OpenAPI gateway'я
+│   ├── Dockerfile
+│   ├── pyproject.toml
+│   ├── README.md
+│   └── images.jpg                  <- маленькая фикстура для SDK quickstart
+├── bridge/                         <- WB → MAX bridge worker
+│   ├── bridge/                     <- config, clients, translator, worker, CLI
+│   ├── tests/                      <- unit + e2e (parser+maxapi через ASGI)
+│   ├── Dockerfile
+│   ├── pyproject.toml
+│   ├── README.md
+│   └── .env.example
+├── docker-compose.yml              <- parser + maxapi + bridge одной командой
+├── Procfile.dev                    <- альтернатива для honcho/foreman
+└── .env.example                    <- переменные docker-compose
 ```
 
 Корневые `configs/`, `data/`, `docs/` — это **общие** ресурсы экосистемы.
@@ -66,7 +74,30 @@
 
 ---
 
-## Быстрый старт
+## Быстрый старт через docker-compose
+
+Единая команда для локальной разработки — все три сервиса вместе:
+
+```bash
+cp .env.example .env       # отредактируй MAXAPI_*_ID при необходимости
+docker compose up --build
+```
+
+По умолчанию compose использует `MAXAPI_BACKEND=memory` (стаб MAX),
+seed-данные `acc_DEMO0000000000000000000000` / `-1001111111111` и
+`MAXAPI_TOKEN=dev-token`. Этого достаточно, чтобы протестировать
+полный цикл `parser → bridge → maxapi → parser` без выхода в сеть
+MAX.
+
+Для запуска без Docker есть [`Procfile.dev`](./Procfile.dev) (нужны
+уже подготовленные venv'ы под каждым каталогом):
+
+```bash
+pip install honcho
+honcho start -f Procfile.dev
+```
+
+## Установка по пакетам
 
 Каждый сервис ставится и запускается **в своём виртуальном окружении** —
 смешивать зависимости не нужно.
@@ -102,6 +133,20 @@ Phone+SMS логин, идемпотентность, медиа, webhooks, `Job
 `ReadyPost` — [`maxapi/README.md`](./maxapi/README.md) и
 [`maxapi/openapi.yml`](./maxapi/openapi.yml).
 
+### Bridge worker
+
+```bash
+cd bridge
+python -m venv .venv
+. .venv/bin/activate
+pip install -e "../parser[dev]" -e "../maxapi[dev,pymax]" -e ".[dev]"
+cp .env.example .env       # пропиши WBBRIDGE_MAXAPI_ACCOUNT_ID/CHANNEL_ID
+wb-bridge ping             # проверить связность с обоими сервисами
+wb-bridge run-loop
+```
+
+Полный список переменных — [`bridge/README.md`](./bridge/README.md).
+
 ---
 
 ## Тесты
@@ -112,6 +157,9 @@ cd parser && . .venv/bin/activate && pytest -q
 
 # MAX Gateway
 cd maxapi && . .venv/bin/activate && pytest -q
+
+# Bridge (включает e2e-тест parser+maxapi через ASGI без сети)
+cd bridge && . .venv/bin/activate && pytest -q
 ```
 
 ---
@@ -128,8 +176,8 @@ cd maxapi && . .venv/bin/activate && pytest -q
 
 ## Разработка дальше
 
-Следующий шаг — реализовать **bridge / poster worker**, который читает
-`ReadyPost` из парсера, материализует медиа в `maxapi`, создаёт
-`Job`'ы и репортит результаты обратно. Подробности и список
-конкретных задач — в
-[`docs/integration_plan.md`](./docs/integration_plan.md) §§ 4 и 6.
+Шаги 1–6 [`docs/integration_plan.md`](./docs/integration_plan.md)
+закрыты: bridge, webhook-приёмник в parser, общий docker-compose —
+на месте. Дальнейшие задачи (полноценный `pymax` backend в проде,
+web-UI, schedule из YAML, продакшен-БД для idempotency-store) — там
+же в § 8.

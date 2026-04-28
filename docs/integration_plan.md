@@ -159,30 +159,42 @@ poster ──results──▶ data/inbox/publication_results.jsonl ──▶ par
 
 ---
 
-## 6. Что нужно сделать **в коде** при следующей итерации (не сейчас)
+## 6. Что нужно сделать **в коде** при следующей итерации
 
-Перечислено для контекста, чтобы будущий агент (или этот же — на
-следующем шаге) знал, чего касаться, а чего нет.
+> **Статус (этот шаг сделан):** все пункты ниже реализованы. Bridge
+> живёт в [`bridge/`](../bridge/), webhook-приёмник — в
+> [`parser/app/api/routes_webhooks_maxapi.py`](../parser/app/api/routes_webhooks_maxapi.py),
+> единый запуск — в [`docker-compose.yml`](../docker-compose.yml).
 
-* В `parser/app/schemas/post.py` — добавить, при необходимости, поле
-  `target_account_id` и `target_channel_id`, которые понадобятся
-  гейтвею. Сейчас они в `ReadyPost` отсутствуют — пост абстрагирован
-  от транспорта; адресат определяется конфигом постера.
-* В `maxapi/api/routers/jobs.py` — проверить, что `POST /v1/jobs`
-  действительно принимает `ReadyPost.source = "wb_parser"` и
-  откатывает `ReadyPostMedia.url` (HTTP url WB-карточки) в
-  материализованный `media_id` через `POST /v1/media`.
-* Реализовать сам мост (новый каталог `bridge/` или `poster/`) —
-  отдельный сервис, читающий `parser` API, загружающий медиа в
-  `maxapi`, создающий `Job` и репортящий результаты обратно. Никакой
-  бизнес-логики (фильтры, скоринг) в нём быть **не должно**.
-* Webhook `publication.*` и `metrics.collected` от `maxapi` →
-  принимающий эндпоинт у парсера (`POST /api/v1/posts/{id}/published`,
-  `POST /api/v1/posts/{id}/metrics`). Можно протащить мостом или
-  настроить прямой webhook из `maxapi` в парсер.
-* Завести один `docker-compose.yml` или `Procfile` в корне, чтобы
-  `parser`, `maxapi` и будущий `bridge` запускались одной командой
-  для локальной разработки.
+* ~~В `parser/app/schemas/post.py` — добавить `target_account_id` /
+  `target_channel_id`.~~ **Не добавлено намеренно.** `ReadyPost`
+  остался абстрагированным от транспорта; адресат задаётся конфигом
+  bridge'а (`WBBRIDGE_MAXAPI_ACCOUNT_ID`, `WBBRIDGE_MAXAPI_CHANNEL_ID`).
+* ~~Проверить, что `POST /v1/accounts/{acc}/publication-jobs`
+  принимает `ReadyPost.source="wb_parser"` и материализует
+  `ReadyPostMedia.url`.~~ **Проверено.** Тест
+  `maxapi/tests/test_jobs.py::test_create_publication_job_publishes_immediately`
+  уже отправляет `source="wb_parser"` с `media[].url` и ожидает
+  `status=published`. Внутри это идёт через
+  `materialize_media_from_refs` (`maxapi/api/storage.py`) — отдельный
+  `POST /v1/media` bridge'у не нужен.
+* ~~Реализовать сам мост.~~ **Сделано.**
+  [`bridge/bridge/worker.py`](../bridge/bridge/worker.py) —
+  `process_one()` / `run_once()` / `run_loop()`. Бизнес-логики нет:
+  `parser → lock → publication-job → mark_published / mark_failed`.
+  Идемпотентность `Idempotency-Key = "wb-bridge:{post_id}"`.
+* ~~Webhook-приёмник в парсере.~~ **Сделано.** `POST /api/v1/webhooks/maxapi`
+  принимает `PublicationEvent` (`publication.published`, `failed`,
+  `cancelled`, `expired`, `accepted`, `scheduled`, `metrics.collected`),
+  опционально проверяет HMAC-SHA256 подпись из `MAXAPI_WEBHOOK_SECRET`,
+  и зовёт `Repository.mark_post_published / mark_post_failed /
+  add_publication_metrics`. Существующие
+  `POST /api/v1/posts/{id}/published|failed|metrics` остались
+  как **синхронный** интерфейс для bridge'а.
+* ~~`docker-compose.yml` / `Procfile` в корне.~~ **Сделано.** В
+  корне есть и [`docker-compose.yml`](../docker-compose.yml) с тремя
+  сервисами + healthcheck'ами + named volume под parser SQLite, и
+  [`Procfile.dev`](../Procfile.dev) для honcho/foreman.
 
 ---
 
