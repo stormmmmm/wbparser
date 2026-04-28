@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtualenvs
+.venv/
+venv/
+.env
+.env.local
+.envrc
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Local SQLite databases (the parser uses one by default)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data the parser writes / consumes at runtime.
+# The directory layout itself is kept (via .gitkeep), but
+# generated artefacts are ignored.
+data/outbox/*
+!data/outbox/.gitkeep
+!data/outbox/ready_posts_sample.json
+data/inbox/*
+!data/inbox/.gitkeep
+data/media_cache/*
+!data/media_cache/.gitkeep
+data/raw_cache/*
+!data/raw_cache/.gitkeep
+
+# maxapi PyMax session/work directories (per-account session.db etc.)
+maxapi-data/
+.maxapi-data/

@@ -1,0 +1,121 @@
+categories:
+  - id: women_clothing
+    name: "Женская одежда"
+    enabled: true
+    min_price: 100
+    max_price: 3000
+    min_rating: 4.6
+    min_feedbacks: 30
+    priority: 100
+  - id: lingerie_homewear
+    name: "Нижнее белье и домашняя одежда"
+    enabled: true
+    min_price: 100
+    max_price: 3000
+    min_rating: 4.8
+    min_feedbacks: 40
+    priority: 95
+  - id: shoes
+    name: "Обувь"
+    enabled: true
+    min_price: 300
+    max_price: 4000
+    min_rating: 4.6
+    min_feedbacks: 35
+    priority: 85
+  - id: bags
+    name: "Сумки"
+    enabled: true
+    min_price: 200
+    max_price: 3500
+    min_rating: 4.6
+    min_feedbacks: 30
+    priority: 95
+  - id: accessories
+    name: "Аксессуары"
+    enabled: true
+    min_price: 100
+    max_price: 2000
+    min_rating: 4.6
+    min_feedbacks: 25
+    priority: 90
+  - id: jewelry
+    name: "Бижутерия"
+    enabled: true
+    min_price: 100
+    max_price: 2000
+    min_rating: 4.6
+    min_feedbacks: 20
+    priority: 88
+  - id: beauty
+    name: "Косметика и уход"
+    enabled: true
+    min_price: 100
+    max_price: 3000
+    min_rating: 4.8
+    min_feedbacks: 50
+    priority: 100
+  - id: home_decor
+    name: "Интерьер и декор"
+    enabled: true
+    min_price: 100
+    max_price: 3000
+    min_rating: 4.6
+    min_feedbacks: 20
+    priority: 92
+  - id: kitchen
+    name: "Кухня"
+    enabled: true
+    min_price: 100
+    max_price: 3500
+    min_rating: 4.6
+    min_feedbacks: 30
+    priority: 80
+  - id: storage
+    name: "Хранение"
+    enabled: true
+    min_price: 100
+    max_price: 2500
+    min_rating: 4.6
+    min_feedbacks: 20
+    priority: 85
+  - id: stationery
+    name: "Канцелярия"
+    enabled: true
+    min_price: 100
+    max_price: 2000
+    min_rating: 4.6
+    min_feedbacks: 20
+    priority: 83
+  - id: gifts
+    name: "Подарки"
+    enabled: true
+    min_price: 100
+    max_price: 3500
+    min_rating: 4.6
+    min_feedbacks: 20
+    priority: 90
+  - id: sweets
+    name: "Сладости"
+    enabled: true
+    min_price: 100
+    max_price: 1500
+    min_rating: 4.6
+    min_feedbacks: 30
+    priority: 75
+  - id: gadgets
+    name: "Небольшая техника и гаджеты"
+    enabled: true
+    min_price: 300
+    max_price: 10000
+    min_rating: 4.8
+    min_feedbacks: 100
+    priority: 70
+  - id: teens
+    name: "Товары для подростков"
+    enabled: true
+    min_price: 100
+    max_price: 3000
+    min_rating: 4.6
+    min_feedbacks: 20
+    priority: 88

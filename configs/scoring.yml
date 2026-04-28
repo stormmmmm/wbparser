@@ -1,0 +1,35 @@
+weights:
+  visual_score: 0.30
+  audience_fit_score: 0.20
+  price_score: 0.15
+  discount_score: 0.10
+  rating_score: 0.10
+  feedback_score: 0.05
+  trend_score: 0.05
+  season_score: 0.05
+thresholds:
+  ready: 70
+  needs_review: 55
+price_ranges:
+  absolute_min: 100
+  absolute_max: 3000
+  premium_max: 10000
+  comfort_min: 300
+  comfort_max: 2000
+  impulse_min: 100
+  impulse_max: 1000
+filters:
+  min_images: 3
+  min_rating_default: 4.6
+  min_rating_strict: 4.8
+  min_feedbacks_default: 30
+  min_feedbacks_beauty: 50
+  min_feedbacks_tech: 100
+  cooldown_days: 14
+risk_penalty:
+  no_availability: 30
+  low_rating: 25
+  low_feedbacks: 20
+  bad_category: 20
+  suspicious_discount: 10
+  complaint_keyword: 15

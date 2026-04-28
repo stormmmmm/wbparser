@@ -1,0 +1,828 @@
+﻿ПРОМПТ ДЛЯ НЕЙРОСЕТИ-РАЗРАБОТЧИКА: WILDBERRIES-ПАРСЕР ДЛЯ TELEGRAM-КАНАЛА НАХОДОК
+
+Ты senior backend/data engineer. Твоя задача - написать production-ready парсер Wildberries и модуль отбора товаров для Telegram-канала формата «эстетичные находки с Wildberries». Это не обычный скидочный парсер. Проект должен находить визуально привлекательные, недорогие, актуальные и безопасные товары, готовить из них кандидаты для постов и отдавать их автоматизированному скрипту публикации.
+
+Работай как coding-agent: сначала изучи текущую папку проекта, затем создай недостающую структуру, реализуй код, тесты, README и примеры конфигов. Важное ограничение по изоляции: целиком весь код парсера должен находиться внутри папки parser, чтобы не конфликтовать с другим кодом проекта. Это касается API, CLI, clients, services, db, schemas, tests, migrations, worker/scheduler, утилит и любых вспомогательных скриптов. В корне проекта допустимы только конфигурационные файлы/папки и data/outbox/inbox, если они нужны для интеграции с внешним постинг-скриптом. Если в проекте уже есть код или постинг-скрипт, не ломай его интерфейсы, а добавь совместимый адаптер внутри parser. Если постинг-скрипта нет, реализуй стандартный контракт, описанный ниже.
+
+1. Контекст канала и продукта
+
+Исходная модель канала: эмоциональная витрина Wildberries, а не каталог скидок. Канал экономит подписчику время: кто-то уже отобрал милые, красивые, недорогие или выгодные вещи, которые хочется сохранить, отправить подруге или купить.
+
+Аудитория:
+- Основная: русскоязычные девушки и женщины 14-35 лет.
+- Ядро: 16-28 лет.
+- Интересы: одежда, белье, косметика, уход, сумки, аксессуары, уютная комната, подарки, канцелярия, сладости, небольшие гаджеты, Pinterest/TikTok/Y2K/корейский стиль.
+- Главный мотив: быстро найти «милое, полезное, недорогое, визуально приятное».
+
+Важные выводы из анализа канала:
+- Средний пост содержит около 5-6 медиа, сильные подборки часто используют 5-10 фото.
+- Артикул WB - центральное поле. CTA строится вокруг «клик по артикулу».
+- Цена важна, но скидка не является единственным критерием.
+- Главная формула интересности: визуал + соответствие аудитории + импульсность + комфортная цена + простота покупки.
+- Лучшие подборки собираются вокруг вайба, цвета, сценария, сезона, подарочного повода или эстетики.
+- Текст короткий: заголовок, артикулы/цены, 1-3 преимущества, иногда реакционное голосование.
+- Постинг часто идет пачками: ориентир 6 постов в день, активный режим 8-12 постов в день.
+
+2. Цель проекта
+
+Нужно реализовать сервис, который:
+- собирает товары Wildberries из категорий, поиска, трендовых ключей и ручных списков артикулов;
+- нормализует карточки товаров и сохраняет историю цен/наличия/рейтингов;
+- фильтрует неподходящие товары;
+- считает selection_score для каждого кандидата;
+- группирует товары в одиночные посты и подборки;
+- генерирует готовые payload-объекты для постинг-скрипта;
+- предоставляет REST API, CLI и файловый outbox для интеграции с автоматической публикацией;
+- принимает обратно статусы публикации и метрики Telegram/кликов для обучения отбора.
+
+Парсер НЕ должен сам публиковать в Telegram по умолчанию. Публикация - ответственность отдельного автоматизированного скрипта. Парсер должен подготовить пост и отдать его через стабильный контракт.
+
+3. Рекомендуемый стек
+
+Если в текущем проекте нет другого стека, используй:
+- Python 3.11+;
+- httpx/asyncio для HTTP-запросов;
+- Pydantic v2 для схем данных;
+- SQLAlchemy 2.x + Alembic для базы;
+- SQLite по умолчанию для локального запуска, PostgreSQL через DATABASE_URL для production;
+- FastAPI + Uvicorn для интеграционного API;
+- Typer или argparse для CLI;
+- pytest + respx/httpx mocks для тестов;
+- ruff/black или другой единый форматтер;
+- Pillow/imagehash опционально для дедупликации изображений;
+- Playwright только как fallback, если JSON/API-источник WB недоступен.
+
+Изолируй WB-адаптер так, чтобы изменения публичных эндпоинтов Wildberries не ломали бизнес-логику. Не размазывай URL и формат raw payload по проекту.
+
+4. Ожидаемая структура проекта
+
+Создай примерно такую структуру, адаптируя под существующий проект. Главное правило: весь исполняемый код, тесты, миграции и внутренние модули парсера должны быть только внутри parser/. Не создавай app/, tests/, scripts/, migrations/ или другие кодовые директории в корне проекта.
+
+configs/
+  categories.yml
+  search_queries.yml
+  trend_keywords.yml
+  scoring.yml
+  stop_words.yml
+  excluded_articles.yml
+data/
+  outbox/
+    ready_posts.jsonl
+    ready_posts_sample.json
+  inbox/
+    publication_results.jsonl
+    telegram_metrics.jsonl
+  media_cache/
+parser/
+  pyproject.toml
+  README.md
+  .env.example
+  app/
+    __init__.py
+    config.py
+    logging_config.py
+    cli.py
+    api/
+      __init__.py
+      main.py
+      routes_health.py
+      routes_posts.py
+      routes_products.py
+      routes_metrics.py
+    clients/
+      __init__.py
+      wildberries.py
+      affiliate.py
+      telegram_metrics.py
+    db/
+      __init__.py
+      base.py
+      models.py
+      session.py
+      repositories.py
+      migrations/
+    schemas/
+      __init__.py
+      product.py
+      post.py
+      metrics.py
+    services/
+      __init__.py
+      collect_candidates.py
+      normalize_product.py
+      filter_products.py
+      score_products.py
+      review_analyzer.py
+      media_selector.py
+      post_builder.py
+      outbox.py
+      scheduler.py
+      deduplication.py
+    utils/
+      __init__.py
+      time.py
+      text.py
+      urls.py
+      retries.py
+  tests/
+    fixtures/
+      wb_product.json
+      wb_search.json
+      ready_post.json
+    test_normalize_product.py
+    test_filters.py
+    test_scoring.py
+    test_post_builder.py
+    test_api_contract.py
+
+Если проект уже имеет другую структуру, сохрани идею разделения внутри parser/: clients -> services -> db -> schemas -> api/cli. Не выноси код парсера в корень проекта или соседние папки.
+
+5. Источники данных
+
+Сервис должен уметь собирать данные из:
+- Wildberries catalog/search/category выдач;
+- карточки товара WB по article_id;
+- карточек/эндпоинтов с ценой, старой ценой, скидкой, рейтингом, отзывами, наличием, размерами и фото;
+- ручного списка трендовых ключевых слов;
+- ручного списка категорий и поисковых запросов;
+- ручного списка исключенных артикулов;
+- ручного списка артикулов для повторной проверки;
+- Telegram-метрик после публикации, если они доступны;
+- партнерской статистики кликов, если используется редирект или affiliate-ссылки.
+
+Требования к WB-клиенту:
+- async-запросы с лимитом параллельности;
+- retry с exponential backoff для 429/5xx/network errors;
+- таймауты;
+- кеширование raw-ответов для отладки;
+- User-Agent и rate limit в конфиге;
+- подробное логирование ошибок без падения всего процесса;
+- сохранение raw_payload в product_snapshots для воспроизводимости;
+- нормализация article_id из URL вида wildberries.ru/catalog/<article_id>/detail.aspx.
+
+6. Категории, которые нужно анализировать
+
+Включить в базовый сбор:
+- женская одежда;
+- нижнее белье и домашняя одежда;
+- обувь;
+- сумки;
+- аксессуары;
+- бижутерия;
+- косметика;
+- уход;
+- товары для дома;
+- интерьер и декор;
+- кухня;
+- хранение;
+- канцелярия;
+- творчество;
+- подарки;
+- сладости;
+- небольшая техника и гаджеты;
+- товары для подростков.
+
+Приоритетные рубрики для будущих постов:
+- «До 500»;
+- «До 1000»;
+- «Комната как Pinterest»;
+- «Собираем образ»;
+- «Бьюти-находка дня»;
+- «Подарок подруге»;
+- «Милое, но полезное»;
+- «Вещь выглядит дороже»;
+- «Цветовая подборка»;
+- «Проверка отзывов».
+
+Исключать или сильно штрафовать:
+- автотовары;
+- ремонт/инструменты;
+- промышленное оборудование;
+- крупную мебель;
+- товары без визуальной привлекательности;
+- сомнительные БАДы и товары с медицинскими обещаниями;
+- товары 18+ или слишком откровенный визуал для массового канала;
+- товары с высоким риском брака;
+- товары вне эстетики канала.
+
+7. Поля товара, которые должен возвращать парсер
+
+Схема ParsedProduct должна содержать минимум:
+
+{
+  "article_id": "string, обязательный уникальный идентификатор WB",
+  "title": "string",
+  "normalized_title": "string",
+  "brand": "string|null",
+  "category_id": "string|null",
+  "category_name": "string|null",
+  "subject_name": "string|null",
+  "tags": ["string"],
+  "price": "int|null, текущая цена в рублях",
+  "old_price": "int|null",
+  "discount_percent": "int|null",
+  "rating": "float|null",
+  "feedbacks_count": "int|null",
+  "orders_count": "int|null, если доступно",
+  "popularity_score": "float|null, если orders_count недоступен",
+  "main_image_url": "string|null",
+  "image_urls": ["string"],
+  "product_url": "string, исходная ссылка WB",
+  "canonical_url": "string, нормализованная ссылка WB без мусорных параметров",
+  "affiliate_url": "string|null, партнерская ссылка, если настроена",
+  "availability": "bool",
+  "sizes_available": ["string"],
+  "colors_available": ["string"],
+  "seller_id": "string|null",
+  "seller_name": "string|null",
+  "source": "category|search|manual|trend|refresh",
+  "source_url": "string|null",
+  "detected_at": "datetime",
+  "first_seen_at": "datetime",
+  "last_checked_at": "datetime",
+  "price_history": ["snapshot refs or embedded short history"],
+  "rating_history": ["snapshot refs or embedded short history"],
+  "review_summary": "object|null",
+  "risk_flags": ["string"],
+  "reason_for_selection": "string|null",
+  "selection_score": "float|null",
+  "visual_score": "float|null",
+  "quality_score": "float|null",
+  "trend_score": "float|null",
+  "season_score": "float|null",
+  "raw_payload_ref": "string|null"
+}
+
+8. Фильтры отбора
+
+Базовые фильтры:
+- price от 100 до 3000 руб. для основной ленты;
+- отдельный premium-режим до 10000 руб. только для визуально сильных товаров;
+- основной комфортный диапазон 300-2000 руб.;
+- импульсный диапазон 100-1000 руб.;
+- rating >= 4.6 для обычных товаров;
+- rating >= 4.8 для бьюти, белья, техники и БАДов;
+- feedbacks_count >= 30 для одежды/аксессуаров;
+- feedbacks_count >= 50 для косметики и ухода;
+- feedbacks_count >= 100 для техники и БАДов;
+- для дешевых визуально сильных мелочей можно допустить 10-20 отзывов;
+- discount_percent >= 20 только для скидочных рубрик;
+- availability = true;
+- есть минимум 3-5 качественных фото;
+- для дорогих товаров должны быть реальные фото/отзывы;
+- перед публикацией обязательна перепроверка цены и наличия.
+
+Исключать товары, если:
+- rating < 4.5;
+- мало отзывов при высокой цене;
+- нет наличия;
+- нет хороших фото;
+- плохие отзывы часто говорят о браке, запахе, размере, подделке, аллергии, раздражении, тонкой ткани, поломках, несоответствии фото;
+- медицинские обещания, похудение, лечение или спорные БАДы;
+- старая цена выглядит искусственной;
+- товар повторяется чаще заданного cooldown;
+- товар не попадает в стиль канала.
+
+9. Scoring: как считать интересность
+
+Реализуй selection_score от 0 до 100:
+
+selection_score =
+  0.30 * visual_score +
+  0.20 * audience_fit_score +
+  0.15 * price_score +
+  0.10 * discount_score +
+  0.10 * rating_score +
+  0.05 * feedback_score +
+  0.05 * trend_score +
+  0.05 * season_score -
+  risk_penalty
+
+Расшифровка:
+- visual_score: качество первого кадра, понятность, приятные цвета, lifestyle-фото, «милота», отсутствие грязного фона;
+- audience_fit_score: подходит ли аудитории девушек/дома/учебы/красоты/подарка;
+- price_score: максимум около 300-1500 руб., ниже для слишком дорогих товаров;
+- discount_score: скидка и честность старой цены, но не главный фактор;
+- rating_score: высокий рейтинг, особенно выше 4.6;
+- feedback_score: количество и качество отзывов;
+- trend_score: совпадение с трендовыми ключами;
+- season_score: актуальность сезона, праздников, учебы, отпуска, уюта;
+- risk_penalty: плохие отзывы, спорная категория, нет наличия, подозрительная скидка, медицинские обещания.
+
+Пороговые решения:
+- selection_score >= 70: можно готовить в ленту;
+- 55-69: отправить на ручную проверку;
+- ниже 55: не публиковать.
+
+Важно: visual_score может быть полуавтоматическим. Если нет vision-модели, сделай эвристики и поле manual_visual_approve. Эвристики: количество фото, наличие lifestyle-фото, размеры изображений, отсутствие дубликатов, позиция главного фото, категория, цвета/ключевые слова, отзывы с фото.
+
+10. База данных
+
+Создай таблицы или ORM-модели:
+
+products:
+- id;
+- article_id unique;
+- title;
+- normalized_title;
+- brand;
+- category_id;
+- category_name;
+- subject_name;
+- tags json;
+- product_url;
+- canonical_url;
+- affiliate_url;
+- main_image_url;
+- image_urls json;
+- current_price;
+- old_price;
+- discount_percent;
+- rating;
+- feedbacks_count;
+- orders_count;
+- popularity_score;
+- availability;
+- sizes json;
+- colors json;
+- seller_id;
+- seller_name;
+- first_seen_at;
+- detected_at;
+- last_checked_at;
+- source;
+- created_at;
+- updated_at.
+
+product_snapshots:
+- id;
+- article_id;
+- checked_at;
+- price;
+- old_price;
+- discount_percent;
+- rating;
+- feedbacks_count;
+- availability;
+- category_position;
+- image_hash;
+- raw_payload json.
+
+selected_candidates:
+- id;
+- article_id;
+- selected_at;
+- selection_score;
+- visual_score;
+- audience_fit_score;
+- price_score;
+- discount_score;
+- rating_score;
+- feedback_score;
+- trend_score;
+- season_score;
+- risk_penalty;
+- reason_for_selection;
+- status: new|needs_review|approved|ready|rejected|expired|published;
+- reviewer_note.
+
+review_summaries:
+- id;
+- article_id;
+- parsed_at;
+- positives json;
+- negatives json;
+- bad_review_rate;
+- main_complaints json;
+- main_praises json;
+- quality_notes;
+- reject_reason.
+
+media_assets:
+- id;
+- article_id;
+- source_url;
+- local_path;
+- media_type;
+- width;
+- height;
+- image_hash;
+- is_main;
+- visual_rank;
+- created_at.
+
+posts:
+- id;
+- post_type: single|collection|visual_poll|discount|scenario;
+- title;
+- post_text;
+- media_urls json;
+- planned_at;
+- published_at;
+- publication_status: draft|ready|locked|published|failed|expired;
+- lock_until;
+- telegram_message_id;
+- telegram_url;
+- reactions_total;
+- reaction_breakdown json;
+- views_count;
+- clicks_count;
+- conversion_count;
+- created_at;
+- updated_at.
+
+post_items:
+- id;
+- post_id;
+- article_id;
+- position;
+- displayed_price;
+- displayed_old_price;
+- displayed_discount;
+- displayed_url;
+- displayed_caption.
+
+publication_metrics:
+- id;
+- post_id;
+- collected_at;
+- views_count;
+- reactions_total;
+- reaction_breakdown json;
+- comments_count;
+- forwards_count.
+
+click_metrics:
+- id;
+- post_id;
+- article_id;
+- clicked_at;
+- click_source;
+- redirect_id;
+- raw_payload json.
+
+category_rules:
+- id;
+- category_name;
+- enabled;
+- min_price;
+- max_price;
+- min_rating;
+- min_feedbacks;
+- priority;
+- notes.
+
+excluded_articles:
+- article_id;
+- reason;
+- created_at;
+- expires_at.
+
+11. Как формировать посты
+
+Сервис должен генерировать не только товары, но и ReadyPost payload для постинг-скрипта.
+
+Типы постов:
+- single: одиночный товар с 4-6 фото и 2-3 преимуществами;
+- collection: подборка 4-8 товаров с артикулами/ценами;
+- visual_poll: визуальная подборка с голосованием реакциями;
+- discount: товар или подборка со скидкой;
+- scenario: подборка под сценарий: учеба, комната, подарок, отпуск, уход, образ.
+
+Шаблон подборки:
+[Короткий заголовок/вайб]
+
+1. [article_id] - [price] ₽ / [короткая польза]
+2. [article_id] - [price] ₽ / [короткая польза]
+3. [article_id] - [price] ₽ / [короткая польза]
+
+(клик по артикулу, чтобы перейти на товар)
+
+Шаблон визуальной подборки:
+[Название вайба/категории]
+
+Нравится подборка?
+Да - ❤️     Нет - 🔥
+
+Нашла на Wildberries ❤️
+
+Шаблон одиночного товара:
+[Эмоциональный заголовок]
+
+❤️ [главный плюс]
+❤️ [рейтинг/отзывы/покупки, если это усиливает доверие]
+❤️ [цена/скидка/варианты]
+
+[article_id] - [price] ₽
+(клик по артикулу, чтобы перейти на товар)
+
+Шаблон скидочной находки:
+[Товар] со скидкой
+
+Сейчас: [price] ₽
+Было: [old_price] ₽
+Скидка: [discount_percent]%
+
+Почему обратила внимание:
+❤️ [плюс 1]
+❤️ [плюс 2]
+
+[article_id] - клик
+
+Тон текста:
+- коротко;
+- дружески;
+- без экспертного занудства;
+- без длинных обзоров;
+- без недоказанных медицинских обещаний;
+- без агрессивных продаж;
+- акцент на визуал, пользу, цену, артикул и простую покупку.
+
+12. Контракт с автоматизированным скриптом постинга
+
+Парсер должен отдавать постинг-скрипту полностью готовый объект ReadyPost. Скрипт публикации не должен сам парсить WB, считать scoring или выбирать товары. Он только берет готовый пост, отправляет медиа и текст в Telegram, затем возвращает результат.
+
+Primary-интеграция: REST API FastAPI.
+
+Эндпоинты:
+
+GET /health
+Ответ: {"status":"ok","version":"..."}
+
+GET /api/v1/posts/next?limit=1&post_type=collection
+Назначение: получить следующие ready-посты для публикации.
+Возвращать только publication_status=ready и не просроченные посты.
+Перед отдачей пост должен быть перепроверен или иметь fresh_until > now.
+
+POST /api/v1/posts/{post_id}/lock
+Назначение: постинг-скрипт блокирует пост перед публикацией.
+Body: {"worker_id":"poster-1","lock_ttl_seconds":600}
+Ответ: ReadyPost с publication_status=locked.
+Если пост уже locked/published/expired, вернуть 409.
+
+POST /api/v1/posts/{post_id}/published
+Назначение: сообщить, что пост опубликован.
+Body:
+{
+  "telegram_message_id": "string",
+  "telegram_url": "string|null",
+  "published_at": "datetime",
+  "raw_response": {}
+}
+Действие: status=published, сохранить telegram_message_id/url.
+
+POST /api/v1/posts/{post_id}/failed
+Назначение: сообщить об ошибке публикации.
+Body:
+{
+  "error_code": "string",
+  "error_message": "string",
+  "retryable": true
+}
+Действие: status=failed или ready после retry policy.
+
+POST /api/v1/posts/{post_id}/metrics
+Назначение: принять Telegram-метрики после публикации.
+Body:
+{
+  "collected_at": "datetime",
+  "views_count": 123,
+  "reactions_total": 45,
+  "reaction_breakdown": {"❤️":20,"🔥":15},
+  "forwards_count": 2,
+  "comments_count": 0
+}
+
+POST /api/v1/clicks
+Назначение: принять клики, если используется редирект или партнерская статистика.
+Body:
+{
+  "post_id": "string|int",
+  "article_id": "string",
+  "clicked_at": "datetime",
+  "redirect_id": "string|null",
+  "raw_payload": {}
+}
+
+GET /api/v1/products/{article_id}
+Назначение: получить актуальную карточку товара для отладки или ручного approve.
+
+Fallback-интеграция через файлы:
+- parser пишет JSON Lines в data/outbox/ready_posts.jsonl;
+- parser складывает локально скачанные/подготовленные медиа в data/media_cache/ или отдает remote URLs;
+- poster читает ready_posts.jsonl и после публикации пишет результат в data/inbox/publication_results.jsonl;
+- parser периодически импортирует publication_results.jsonl и обновляет statuses.
+
+CLI-команды:
+- wb-parser collect --source search --query "сумка багет" --limit 100
+- wb-parser collect --source category --category-id <id> --limit 100
+- wb-parser refresh --article-id <article_id>
+- wb-parser score --limit 500
+- wb-parser build-posts --type collection --limit 10
+- wb-parser export-ready --format jsonl --output data/outbox/ready_posts.jsonl
+- wb-parser import-publication-results --input data/inbox/publication_results.jsonl
+- wb-parser serve --host 0.0.0.0 --port 8000
+- wb-parser worker --loop --interval 300
+
+13. Схема ReadyPost, которую должен получать постинг-скрипт
+
+{
+  "post_id": "string|int",
+  "post_type": "single|collection|visual_poll|discount|scenario",
+  "title": "string",
+  "text": "string, уже готовый текст Telegram-поста",
+  "parse_mode": "HTML|null",
+  "media": [
+    {
+      "position": 1,
+      "article_id": "string|null",
+      "url": "https://...",
+      "local_path": "string|null",
+      "type": "photo",
+      "caption": "string|null"
+    }
+  ],
+  "items": [
+    {
+      "position": 1,
+      "article_id": "string",
+      "title": "string",
+      "short_title": "string",
+      "price": 999,
+      "old_price": 1499,
+      "discount_percent": 33,
+      "rating": 4.8,
+      "feedbacks_count": 120,
+      "displayed_url": "https://...",
+      "canonical_url": "https://www.wildberries.ru/catalog/.../detail.aspx",
+      "affiliate_url": "https://...|null",
+      "main_image_url": "https://...",
+      "reason_for_selection": "пастельный органайзер, до 700 ₽, подходит для комнаты/косметики",
+      "risk_flags": []
+    }
+  ],
+  "buttons": [
+    {
+      "text": "Открыть товар 1",
+      "url": "https://..."
+    }
+  ],
+  "reactions_hint": {
+    "enabled": true,
+    "text": "Да - ❤️     Нет - 🔥"
+  },
+  "planned_at": "datetime|null",
+  "fresh_until": "datetime, после этого нужна перепроверка",
+  "publication_status": "ready",
+  "created_at": "datetime",
+  "source": "wb_parser",
+  "version": "1"
+}
+
+Требования:
+- text должен быть готов к отправке без дополнительной генерации;
+- media должно содержать 1-10 изображений, обычно 5-9 для подборки;
+- displayed_url должен быть affiliate_url, если партнерка настроена, иначе canonical_url;
+- post_id должен быть идемпотентным;
+- один article_id не должен попадать в несколько постов подряд чаще cooldown;
+- перед выдачей /posts/next товар должен пройти revalidate: наличие, цена, ссылка, медиа.
+
+14. Workflow сервиса
+
+Реализуй pipeline:
+
+1. collect_candidates
+- прочитать configs/categories.yml, search_queries.yml, trend_keywords.yml;
+- собрать товары из WB;
+- извлечь article_id;
+- сохранить сырые данные и нормализованные products.
+
+2. refresh_products
+- обновить цену, наличие, рейтинг, отзывы, фото;
+- сохранить product_snapshots;
+- обновить price_history и last_checked_at.
+
+3. filter_products
+- применить hard-фильтры;
+- записать risk_flags и reject_reason.
+
+4. score_products
+- посчитать scoring-компоненты;
+- сохранить selected_candidates.
+
+5. review_analysis
+- если доступны отзывы, выделить частые плюсы/минусы;
+- повысить risk_penalty при жалобах на запах, брак, размер, подделку, раздражение, поломки.
+
+6. media_selection
+- выбрать лучшие 3-10 фото;
+- удалить дубли;
+- при необходимости скачать в media_cache;
+- сохранить media_assets.
+
+7. post_builder
+- собрать одиночные посты и подборки;
+- не перегружать текст;
+- использовать рубрики и шаблоны;
+- записать posts/post_items со статусом draft или ready.
+
+8. outbox/API
+- отдать ready-посты постинг-скрипту;
+- поставить lock на время публикации;
+- принять статус published/failed;
+- принять метрики.
+
+9. learning loop
+- учитывать реакции, клики, просмотры и сохранения, если доступны;
+- снижать будущий scoring для товаров/категорий с плохой статистикой;
+- добавлять проблемные артикулы в excluded_articles.
+
+15. Обновление данных
+
+Расписание:
+- кандидаты: проверять каждые 2-4 часа;
+- перед публикацией: обязательная проверка за 5-15 минут;
+- опубликованные товары: перепроверять раз в 12-24 часа, если есть клики;
+- price_history: сохранять при каждом изменении;
+- отзывы/рейтинг: обновлять раз в сутки;
+- трендовые ключи: обновлять 1-2 раза в неделю;
+- excluded_articles: учитывать всегда.
+
+16. Качество, безопасность и ограничения
+
+Обязательно:
+- не делать агрессивный scraping, добавить rate limits;
+- не хранить секреты в коде, использовать .env;
+- не падать из-за одного битого товара;
+- логировать причины отбраковки;
+- писать тесты на нормализацию, фильтры, scoring, post_builder и API-контракт;
+- использовать фикстуры raw WB payload;
+- добавить README с запуском, переменными окружения и примерами CLI;
+- добавить .env.example;
+- добавить sample ready_posts JSON;
+- сделать idempotency для повторного запуска;
+- сделать дедупликацию article_id и изображений;
+- отделить hard reject от ручного approve;
+- учитывать, что старая цена может быть манипулятивной;
+- осторожно работать с БАДами, медициной и косметикой;
+- если affiliate-ссылки включены, хранить canonical_url и affiliate_url раздельно.
+
+Не делай:
+- не превращай проект в Telegram-бота, если это не требуется существующим кодом;
+- не публикуй посты напрямую без контракта с постинг-скриптом;
+- не выбирай товары только по скидке;
+- не публикуй товары без актуального наличия;
+- не генерируй длинные экспертные обзоры;
+- не удаляй/не переписывай существующий код без необходимости.
+
+17. Переменные окружения
+
+Добавь .env.example:
+
+DATABASE_URL=sqlite:///./wb_parser.db
+WB_RATE_LIMIT_PER_SECOND=2
+WB_REQUEST_TIMEOUT_SECONDS=20
+WB_MAX_CONCURRENCY=5
+AFFILIATE_ENABLED=false
+AFFILIATE_BASE_URL=
+API_HOST=0.0.0.0
+API_PORT=8000
+OUTBOX_PATH=data/outbox/ready_posts.jsonl
+INBOX_PUBLICATION_RESULTS_PATH=data/inbox/publication_results.jsonl
+MEDIA_CACHE_DIR=data/media_cache
+POST_REVALIDATE_MINUTES=15
+POST_LOCK_TTL_SECONDS=600
+DEFAULT_POST_COOLDOWN_DAYS=14
+LOG_LEVEL=INFO
+
+18. Acceptance criteria
+
+Считай задачу выполненной, когда:
+- проект устанавливается и запускается локально;
+- есть CLI для сбора, scoring, сборки постов и экспорта outbox;
+- есть FastAPI API с эндпоинтами контракта;
+- есть модели БД и миграции или auto-create для SQLite dev mode;
+- есть минимум 5 тестов на ключевую бизнес-логику;
+- есть README с быстрым стартом;
+- есть sample ReadyPost JSON;
+- parser умеет вернуть список ParsedProduct и ReadyPost;
+- post_builder создает короткие посты в стиле канала;
+- перед выдачей поста происходит revalidate цены/наличия;
+- статусы ready/locked/published/failed работают идемпотентно;
+- публикационный скрипт может работать без знания внутренностей парсера: получил ReadyPost -> отправил -> вернул результат.
+
+19. Первый практический шаг
+
+Начни с реализации минимального вертикального среза:
+- config + schemas;
+- WB client с моками/фикстурами;
+- normalize_product;
+- filters;
+- scoring;
+- SQLite models;
+- post_builder для single и collection;
+- GET /api/v1/posts/next и POST /published;
+- CLI export-ready;
+- тесты.
+
+После этого расширяй источники, review_analysis, media_cache, scheduler и learning loop.

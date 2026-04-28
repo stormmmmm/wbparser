@@ -1,0 +1,2648 @@
+openapi: 3.0.3
+info:
+  title: MAX Userbot Posting API
+  version: 2.0.0
+  description: |
+    # Overview
+
+    REST gateway around an authorized MAX user account ("userbot"). Publishes
+    to channels the operator owns or administers, with rich text formatting,
+    media attachments, scheduling, idempotency, and outgoing webhooks.
+
+
+    This contract describes a **local posting gateway** that sits in front of an
+    authorized MAX user account and exposes its publishing surface as a REST API.
+    The gateway speaks the internal MAX wire protocol via the
+    [`maxapi-python`](https://github.com/MaxApiTeam/PyMax) (PyMax) client, which
+    is a community-maintained reverse-engineered library — there is no official
+    MAX userbot API.
+
+    The API is intended for **owned or administered channels only** and does not
+    expose bulk messaging, member scraping, ban evasion, or any abuse vectors.
+
+    ## Authorization
+
+    Every request (except `GET /health`) MUST be authenticated with a static
+    bearer token belonging to the operator running the gateway:
+
+    ```
+    Authorization: Bearer <token>
+    ```
+
+    The token is configured server-side via the `MAXAPI_TOKEN` environment
+    variable (default `dev-token` for local development). It identifies the
+    **operator** of the gateway, not an end user. End-user identity (the
+    actual MAX account that publishes the post) is provided per request via
+    the `accountId` path parameter; the gateway maps that id to a stored
+    PyMax session that has already completed phone-number + SMS-code login.
+
+    Errors related to the bearer header always come back as `401 Unauthorized`
+    with `code = "unauthorized"`.
+
+    ## Account lifecycle (phone + SMS login)
+
+    A MAX account is connected interactively, in two steps:
+
+    1. `POST /v1/accounts/login/start` with the phone number. The gateway asks
+       PyMax to dispatch an SMS code to the phone and returns an opaque
+       `challenge_id` plus an `expires_at` timestamp.
+    2. `POST /v1/accounts/login/verify` with the `challenge_id` and the
+       6-digit code from the SMS (and `two_factor_password` if 2FA is on).
+       On success the gateway materializes an `Account` resource and persists
+       the PyMax session under `MAXAPI_PYMAX_WORK_DIR/<account_id>/session.db`
+       so subsequent gateway restarts do not require a fresh login.
+
+    Account ids look like `acc_<26 chars ULID>` and are stable for the
+    lifetime of the underlying PyMax session.
+
+    ## Idempotency
+
+    Mutating endpoints (`POST` for publish/import/schedule, `POST` for
+    publication jobs, etc.) honour an optional `Idempotency-Key` header.
+    A repeated request with the same key against the same operation
+    returns the original response without creating a duplicate. Keys must
+    be 8–128 characters and live for 24 hours per `(operation, key)` pair.
+
+    ## Pagination
+
+    List endpoints return up to `limit` items (1–100, default 50) and an
+    opaque `next_cursor` string. To page forward, pass it back as the
+    `cursor` query parameter. There is no total count — the cursor is
+    `null` once the page is the last one.
+
+    ## Errors
+
+    All non-2xx responses use the same JSON envelope (`ErrorResponse` /
+    `ValidationErrorResponse`):
+
+    ```json
+    {"code": "validation_failed", "message": "...", "request_id": null,
+     "retryable": false, "errors": [{"field": "text", "message": "...",
+                                      "code": "text_too_long"}]}
+    ```
+
+    The `retryable` flag is set on `429` and `503` to hint that the caller
+    can safely retry after a back-off.
+
+    ## Text formatting & word-links
+
+    Each post (`PublishPostRequest`) carries a `format` field with three
+    values:
+
+    | format     | Behaviour                                                                                  |
+    | ---------- | ------------------------------------------------------------------------------------------ |
+    | `plain`    | Text is sent verbatim. Bare URLs (`https://example.com`) are auto-linked by MAX clients.    |
+    | `markdown` | The gateway parses a small Markdown subset and emits MAX wire elements (see below).         |
+    | `html`     | Reserved. Currently treated as `plain` because the wire protocol has no HTML renderer.      |
+
+    ### Markdown subset (`format: "markdown"`)
+
+    | Markdown                       | Wire element                              | Meaning                       |
+    | ------------------------------ | ----------------------------------------- | ----------------------------- |
+    | `[label](https://example.com)` | `LINK`, `attributes: {"url": "..."}`       | **Word-link** — clickable label |
+    | `**bold**`                     | `STRONG`                                  | Bold span                     |
+    | `__underline__`                | `UNDERLINE`                               | Underlined span               |
+    | `~~strike~~`                   | `STRIKETHROUGH`                           | Strikethrough span            |
+    | `*italic*`                     | `EMPHASIZED`                              | Italic span                   |
+
+    Each span becomes a single `MessageElement` carrying the `type`, the
+    `from` offset and `length` measured in the **clean** text (markdown
+    delimiters are stripped before sending), plus an `attributes` map for
+    types that need extra data (currently only `LINK.attributes.url`).
+
+    Example body — two images, an emoji, a word-link, plus mixed
+    formatting:
+
+    ```json
+    {
+      "text": "🚀 [Открыть Google](https://google.com), а ещё **жирный**, __подчёркнутый__ и ~~зачёркнутый~~ текст.",
+      "format": "markdown",
+      "media": [
+        {"media_id": "med_AAA...", "type": "image"},
+        {"media_id": "med_BBB...", "type": "image"}
+      ],
+      "options": {"disable_notification": false}
+    }
+    ```
+
+    ### Allowed link schemes
+
+    The Markdown link parser accepts URLs starting with `http://`, `https://`,
+    `mailto:`, `tg:`, or `max:`. Unknown schemes are left as plain text.
+
+    ## Attaching media
+
+    There are two ways to attach media to a post:
+
+    1. **Upload-then-reference** (recommended for binary files the operator
+       holds):
+       1. `POST /v1/accounts/{accountId}/media` (multipart with `type` and
+          `file` fields) → returns `Media.media_id`.
+       2. Reference it from the post body: `media: [{"media_id": "med_...",
+          "type": "image"}]`.
+    2. **Import-by-URL**: `POST /v1/accounts/{accountId}/media/import` with
+       a public HTTP/HTTPS URL — the gateway downloads it server-side and
+       returns the same kind of `Media` record.
+
+    Up to 10 media items per post (`PublishPostRequest.media`). Order is
+    determined by `MediaRef.position` (1-based).
+
+    ## Inline keyboards
+
+    The contract exposes an `InlineKeyboard` for the post body
+    (rows of `InlineButton`s). Concrete rendering of buttons depends on
+    backend capability: PyMax does not currently surface an inline-keyboard
+    primitive, so the gateway accepts the structure (so future backends can
+    pick it up) but only `link` buttons are guaranteed to round-trip
+    visually as clickable URLs in the text body. Treat keyboards as
+    best-effort metadata for now.
+
+    ## Webhooks
+
+    Outgoing webhooks let the gateway notify a caller-controlled URL when
+    a publication job changes state (`publication.accepted`, `.scheduled`,
+    `.published`, `.failed`, `.cancelled`) or when post metrics are
+    collected (`metrics.collected`). The body schema is `PublicationEvent`.
+
+    Every webhook delivery includes a `signature` header computed as
+    `HMAC-SHA256(secret, event_id || "." || occurred_at)` so the receiver
+    can verify it came from this gateway. The shared `secret` is provided
+    when the subscription is created.
+
+    ## Versioning
+
+    Path prefix `/v1` is reserved for backwards-compatible additions only.
+    Breaking changes require a new prefix (`/v2`). Schemas tagged
+    `additionalProperties: true` may grow new optional fields; clients
+    MUST NOT fail on unknown ones.
+  contact:
+    name: WB Channel Automation
+    url: https://github.com/stormmmmm/maxapi
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local userbot gateway (default for development).
+  - url: https://poster.example.com
+    description: Production gateway placeholder.
+
+externalDocs:
+  description: PyMax — community library powering the userbot backend.
+  url: https://github.com/MaxApiTeam/PyMax
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: health
+    description: Service readiness and diagnostics. No authentication required.
+  - name: accounts
+    description: |
+      Authorized MAX user-account sessions. Login is interactive
+      (phone + SMS code), sessions persist across gateway restarts.
+  - name: channels
+    description: |
+      Channel discovery, permissions, and metadata for the connected
+      account.
+  - name: media
+    description: |
+      Media upload (multipart) and remote media import (URL). The returned
+      `Media.media_id` is then referenced from `PublishPostRequest.media`.
+  - name: posts
+    description: |
+      Immediate publication, edit, delete, pin/unpin and metrics for a
+      single channel post. Supports rich text formatting (incl. word-links)
+      and up to 10 media attachments per post.
+  - name: schedules
+    description: Delayed publication of posts at a specified UTC time.
+  - name: jobs
+    description: |
+      End-to-end publication jobs that consume `ReadyPost` payloads (e.g.
+      from the WB parser pipeline) and orchestrate validation, media
+      import, and publishing in one call.
+  - name: webhooks
+    description: Outgoing status callbacks and post-metrics events.
+
+paths:
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      description: |
+        Returns the gateway's self-reported health. Does **not** ping the
+        upstream MAX servers — `max_upstream` is best-effort and may be
+        omitted.
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              examples:
+                ok:
+                  value:
+                    status: ok
+                    version: "2.0.0"
+                    time: "2026-04-27T19:00:00Z"
+                    max_upstream: ok
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts:
+    get:
+      tags: [accounts]
+      summary: List connected MAX accounts
+      operationId: listAccounts
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A paginated list of `Account` resources.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /v1/accounts/login/start:
+    post:
+      tags: [accounts]
+      summary: Start MAX user login (request SMS code)
+      description: |
+        Begins an interactive login flow against MAX. The gateway asks
+        PyMax to dispatch an SMS code to the supplied phone number and
+        returns an opaque `challenge_id` valid for ~10 minutes.
+      operationId: startAccountLogin
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartLoginRequest"
+            examples:
+              by_phone:
+                value:
+                  phone: "+79991234567"
+                  device_name: "wb-channel-poster"
+      responses:
+        "202":
+          description: A verification challenge has been created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StartLoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/login/verify:
+    post:
+      tags: [accounts]
+      summary: Verify MAX login challenge (consume SMS code)
+      description: |
+        Completes the login flow. On success a connected `Account` is
+        returned and a persistent PyMax session is stored under
+        `MAXAPI_PYMAX_WORK_DIR/<account_id>/`.
+      operationId: verifyAccountLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyLoginRequest"
+            examples:
+              with_code:
+                value:
+                  challenge_id: "chg_6SOBNHBE3XZSWVYCG2ESZPTEKG"
+                  code: "409761"
+              with_2fa:
+                value:
+                  challenge_id: "chg_6SOBNHBE3XZSWVYCG2ESZPTEKG"
+                  code: "409761"
+                  two_factor_password: "hunter2"
+      responses:
+        "200":
+          description: Account has been connected.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyLoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/{accountId}:
+    get:
+      tags: [accounts]
+      summary: Get account
+      operationId: getAccount
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: The connected account.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/status:
+    get:
+      tags: [accounts]
+      summary: Get account session status
+      description: |
+        Returns the gateway's view of the upstream session, including
+        whether the account is currently allowed to publish (it may be
+        rate-limited or temporarily disabled).
+      operationId: getAccountStatus
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "200":
+          description: Current session status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/logout:
+    post:
+      tags: [accounts]
+      summary: Disconnect account
+      description: |
+        Closes the upstream session and removes the account from the
+        gateway's local state. The persistent session directory on disk
+        is **not** wiped — call DELETE on the underlying directory if you
+        want a fresh re-login.
+      operationId: logoutAccount
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      responses:
+        "204":
+          description: Account session has been removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/channels:
+    get:
+      tags: [channels]
+      summary: List channels visible to the account
+      description: |
+        Returns the channels this account can see on the upstream.
+
+        You can filter by the human-readable **title** of the channel using the
+        `title` query parameter. Matching behaviour is controlled by
+        `title_match` (`exact` or `contains`) and `case_insensitive` (defaults
+        to `true`). This is the recommended way to discover a channel id when
+        you only know its display name.
+
+        Example — find every channel whose title contains "News"
+        (case-insensitive):
+        `GET /v1/accounts/{accountId}/channels?title=News&title_match=contains`
+      operationId: listChannels
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: only_writable
+          in: query
+          description: When `true` (default), restricts the list to channels where the account can publish.
+          schema:
+            type: boolean
+            default: true
+        - name: role
+          in: query
+          description: Filter by the account's role in the channel.
+          schema:
+            $ref: "#/components/schemas/ChannelRole"
+        - name: title
+          in: query
+          description: |
+            Filter by the human-readable channel title (as shown in the MAX
+            client). Use together with `title_match` to choose exact vs.
+            substring matching.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+            example: "My news channel"
+        - name: title_match
+          in: query
+          description: |
+            How `title` is matched:
+              * `exact` — the full title must equal the argument (default).
+              * `contains` — the argument must be a substring of the title.
+          schema:
+            type: string
+            enum: [exact, contains]
+            default: exact
+        - name: case_insensitive
+          in: query
+          description: |
+            When `true` (default), `title` comparison ignores case. Set to
+            `false` to require exact case match.
+          schema:
+            type: boolean
+            default: true
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A paginated list of channels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/channels/find:
+    get:
+      tags: [channels]
+      summary: Find a single channel by its human-readable title
+      description: |
+        Returns the single channel whose title matches. Useful when you only
+        know the channel's display name (e.g. "Test") and want to get its
+        `channel_id` for publishing.
+
+        Matching uses the same `title_match` / `case_insensitive` semantics as
+        `GET /v1/accounts/{accountId}/channels?title=...`.
+
+        * **404** if no channel matches.
+        * **409** (`code=channel_title_ambiguous`) if more than one channel
+          matches the query — refine with `title_match=exact` or inspect the
+          full list via the list endpoint above.
+      operationId: findChannelByTitle
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: title
+          in: query
+          required: true
+          description: Human-readable channel title (as shown in the MAX client).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+            example: "Test"
+        - name: title_match
+          in: query
+          description: Matching strategy.
+          schema:
+            type: string
+            enum: [exact, contains]
+            default: exact
+        - name: case_insensitive
+          in: query
+          description: Case-insensitive comparison. Defaults to true.
+          schema:
+            type: boolean
+            default: true
+        - name: only_writable
+          in: query
+          description: When `true`, restricts the search to channels the account can publish to.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The single channel that matched the title.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Channel"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No channel matched the title.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: channel_not_found
+                message: "No channel found with title='Test'."
+        "409":
+          description: Multiple channels matched the title.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                code: channel_title_ambiguous
+                message: "Found 3 channels matching title='News'; refine with title_match=exact."
+
+  /v1/accounts/{accountId}/channels/resolve:
+    get:
+      tags: [channels]
+      summary: Resolve channel by public link or username
+      description: |
+        Resolves a channel by its `@username`, public link, or numeric id.
+        If you only know the **display title** of the channel (e.g. "Test"),
+        use `/v1/accounts/{accountId}/channels/find?title=...` instead.
+      operationId: resolveChannel
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: link
+          in: query
+          required: true
+          description: Public MAX link, `@username`, or numeric channel id.
+          schema:
+            type: string
+            minLength: 2
+            example: "@my_channel"
+      responses:
+        "200":
+          description: Resolved channel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Channel"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/channels/{channelId}:
+    get:
+      tags: [channels]
+      summary: Get channel
+      operationId: getChannel
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+      responses:
+        "200":
+          description: Channel details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Channel"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/channels/{channelId}/permissions:
+    get:
+      tags: [channels]
+      summary: Get posting permissions for the channel
+      operationId: getChannelPermissions
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+      responses:
+        "200":
+          description: Capability flags for this `(account, channel)` pair.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChannelPermissions"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/media:
+    post:
+      tags: [media]
+      summary: Upload media file (multipart)
+      description: |
+        Uploads a binary file and returns a `Media` record whose
+        `media_id` can be referenced from `PublishPostRequest.media`. Use
+        this for files held by the operator. The upload is streamed
+        through the gateway and saved in the account's working directory
+        (`MAXAPI_PYMAX_WORK_DIR/<account_id>/media/<media_id>-<filename>`)
+        so that PyMax can attach it without a second download round-trip.
+      operationId: uploadMedia
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [type, file]
+              properties:
+                type:
+                  $ref: "#/components/schemas/MediaType"
+                file:
+                  type: string
+                  format: binary
+                  description: The binary payload (max ~50 MiB by default).
+                filename:
+                  type: string
+                  description: Optional override for the visible filename.
+                caption:
+                  type: string
+                  maxLength: 1024
+                  description: Optional caption / alt text.
+            encoding:
+              file:
+                contentType: application/octet-stream
+      responses:
+        "201":
+          description: Media has been uploaded and is ready to be referenced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Media"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/{accountId}/media/import:
+    post:
+      tags: [media]
+      summary: Import media by URL
+      description: |
+        Server-side download of a public HTTP/HTTPS URL into a `Media`
+        record. Useful when the source asset (a product image, a CDN
+        thumbnail) is already publicly accessible.
+      operationId: importMedia
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MediaImportRequest"
+            examples:
+              wb_image:
+                value:
+                  url: "https://images.example.com/product/123.jpg"
+                  type: image
+                  filename: "product-123.jpg"
+                  source_post_id: "post_42"
+      responses:
+        "201":
+          description: Media has been imported.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Media"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/{accountId}/channels/{channelId}/posts/validate:
+    post:
+      tags: [posts]
+      summary: Validate and render a post payload (dry-run)
+      description: |
+        Runs the gateway's normalization (whitespace trimming, length
+        checks, format-specific validation) without contacting MAX.
+        Useful for IDE tooling, scheduled-post previews, and CI checks.
+      operationId: validatePost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishPostRequest"
+      responses:
+        "200":
+          description: Validation result. `valid` is `false` when there are blocking errors.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostValidationResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /v1/accounts/{accountId}/channels/{channelId}/posts:
+    get:
+      tags: [posts]
+      summary: List recent posts in the channel
+      description: |
+        Returns gateway-cached posts (those published through this gateway
+        instance) for the channel. It does **not** scrape upstream message
+        history.
+      operationId: listChannelPosts
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - name: since
+          in: query
+          description: Only return posts published at or after this UTC instant.
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Page of published posts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [posts]
+      summary: Publish a post immediately
+      description: |
+        Publishes the post to the upstream MAX channel and returns the
+        materialized `PublishedPost`. Supports:
+
+        - Rich text formatting (`format = "markdown"`) with **word-links**
+          via `[label](url)`, `**bold**`, `__underline__`, `~~strike~~`,
+          `*italic*`.
+        - Up to 10 media attachments by `media_id` (uploaded earlier via
+          `POST /media`) or by inline `url` (server-side fetch).
+        - Per-post controls: `disable_notification`, `pin_after_publish`,
+          `remove_previous_pin`, `link_preview`, `dry_run`.
+        - Inline keyboards (best-effort; see _Inline keyboards_ in the API
+          description).
+        - Idempotency via the `Idempotency-Key` header.
+      operationId: publishPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PublishPostRequest"
+            examples:
+              minimal_plain:
+                summary: Minimal plain-text post
+                value:
+                  text: "Привет, MAX!"
+              two_images_with_word_link:
+                summary: Two images, emoji, word-link, mixed formatting (markdown)
+                value:
+                  external_id: "product-42"
+                  text: |-
+                    🚀 Подборка дня — [Открыть на сайте](https://example.com/product/42).
+
+                    **Цена сегодня:** 1 990 ₽ ~~2 490 ₽~~
+                    __Доставка завтра.__
+                  format: markdown
+                  media:
+                    - media_id: "med_AAAA1111"
+                      type: image
+                      position: 1
+                    - media_id: "med_BBBB2222"
+                      type: image
+                      position: 2
+                  options:
+                    disable_notification: false
+                    pin_after_publish: true
+                    remove_previous_pin: true
+                    link_preview: true
+              dry_run:
+                summary: dry_run (no upstream call)
+                value:
+                  text: "Только проверка."
+                  options:
+                    dry_run: true
+      responses:
+        "201":
+          description: Post has been published.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedPost"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/{accountId}/channels/{channelId}/posts/{messageId}:
+    get:
+      tags: [posts]
+      summary: Get a published post
+      operationId: getPublishedPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: The post (gateway-cached view).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedPost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [posts]
+      summary: Edit a published post
+      description: |
+        Updates the upstream message in place. Re-uses the same Markdown
+        parser as `publishPost` when the new text contains a
+        `[label](url)` token, so word-links survive an edit. Pass
+        `media: []` to remove all attachments, or omit the field to keep
+        the existing ones.
+      operationId: editPublishedPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/MessageId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditPostRequest"
+            examples:
+              text_only:
+                value:
+                  text: "Обновлённый текст с [новой ссылкой](https://example.com)."
+                  format: markdown
+      responses:
+        "200":
+          description: The edited post.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedPost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      tags: [posts]
+      summary: Delete a published post
+      operationId: deletePublishedPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "204":
+          description: Post has been deleted upstream and from the cache.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/{accountId}/channels/{channelId}/posts/{messageId}/pin:
+    put:
+      tags: [posts]
+      summary: Pin a post
+      operationId: pinPublishedPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/MessageId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PinPostRequest"
+            examples:
+              silent:
+                value:
+                  notify_subscribers: false
+              with_notify:
+                value:
+                  notify_subscribers: true
+      responses:
+        "200":
+          description: Post pinned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+    delete:
+      tags: [posts]
+      summary: Unpin a post
+      description: |
+        The PyMax backend currently has no native unpin opcode. The
+        gateway therefore best-effort calls upstream and always updates
+        its local cache so the contract behaves as advertised. Manual
+        unpin in the MAX client is recommended if the upstream call fails.
+      operationId: unpinPublishedPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Post unpinned (gateway view).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/channels/{channelId}/posts/{messageId}/metrics:
+    get:
+      tags: [posts]
+      summary: Get post metrics
+      description: |
+        Returns the latest cached metrics for the post (views, reactions,
+        comments, forwards). The PyMax backend does not currently push
+        live counters back, so the gateway returns zeroes until a backend
+        with metrics support is plugged in.
+      operationId: getPostMetrics
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ChannelId"
+        - $ref: "#/components/parameters/MessageId"
+      responses:
+        "200":
+          description: Latest metrics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostMetrics"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/scheduled-posts:
+    get:
+      tags: [schedules]
+      summary: List scheduled posts
+      operationId: listScheduledPosts
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: channel_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/ScheduledPostStatus"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of scheduled posts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduledPostListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [schedules]
+      summary: Schedule a post
+      description: |
+        Stores the post payload and a future UTC `publish_at`; an internal
+        scheduler (or `publish-now`) will dispatch it through the same
+        publish pipeline used by `publishPost`.
+      operationId: schedulePost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SchedulePostRequest"
+      responses:
+        "201":
+          description: Post has been scheduled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduledPost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /v1/accounts/{accountId}/scheduled-posts/{scheduleId}:
+    get:
+      tags: [schedules]
+      summary: Get a scheduled post
+      operationId: getScheduledPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ScheduleId"
+      responses:
+        "200":
+          description: The scheduled post.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduledPost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [schedules]
+      summary: Update a scheduled post
+      description: |
+        Allowed only while `status = scheduled`. Updates `publish_at`
+        and/or the post payload. Pass partial fields; missing fields keep
+        their current values.
+      operationId: updateScheduledPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ScheduleId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateScheduledPostRequest"
+      responses:
+        "200":
+          description: Updated scheduled post.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScheduledPost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+    delete:
+      tags: [schedules]
+      summary: Cancel a scheduled post
+      operationId: cancelScheduledPost
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ScheduleId"
+      responses:
+        "204":
+          description: Scheduled post has been cancelled.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/accounts/{accountId}/scheduled-posts/{scheduleId}/publish-now:
+    post:
+      tags: [schedules]
+      summary: Publish a scheduled post immediately
+      description: Bypass the scheduled time and publish right away. Allowed for `scheduled` and `failed` schedules.
+      operationId: publishScheduledPostNow
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/ScheduleId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          description: Post has been published.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublishedPost"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/{accountId}/publication-jobs:
+    get:
+      tags: [jobs]
+      summary: List publication jobs
+      operationId: listPublicationJobs
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/PublicationJobStatus"
+        - name: source
+          in: query
+          description: Filter by `ReadyPost.source` (e.g. `wb_parser`).
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of publication jobs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicationJobListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [jobs]
+      summary: Create a publication job from a `ReadyPost`
+      description: |
+        Single endpoint that consumes the `ReadyPost` payload produced by
+        upstream content pipelines (e.g. the WB parser) and runs the full
+        publish flow: validation → media import → publish/schedule. The
+        `mode` field decides whether to publish immediately, schedule, or
+        run a dry validation.
+      operationId: createPublicationJob
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePublicationJobRequest"
+      responses:
+        "202":
+          description: Job has been accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicationJob"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/accounts/{accountId}/publication-jobs/{jobId}:
+    get:
+      tags: [jobs]
+      summary: Get a publication job
+      operationId: getPublicationJob
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: The publication job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicationJob"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/accounts/{accountId}/publication-jobs/{jobId}/cancel:
+    post:
+      tags: [jobs]
+      summary: Cancel a publication job
+      description: Allowed for jobs that are not yet `published`, `failed`, `cancelled`, or `expired`.
+      operationId: cancelPublicationJob
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Cancelled job.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicationJob"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/accounts/{accountId}/webhooks:
+    get:
+      tags: [webhooks]
+      summary: List webhook subscriptions
+      operationId: listWebhookSubscriptions
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of webhook subscriptions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSubscriptionListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [webhooks]
+      summary: Create a webhook subscription
+      description: |
+        Each delivery is signed with HMAC-SHA256(secret, event_id +
+        "." + occurred_at). Choose a strong shared secret (16-256 chars).
+      operationId: createWebhookSubscription
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWebhookSubscriptionRequest"
+      responses:
+        "201":
+          description: Subscription has been created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookSubscription"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationFailed"
+
+  /v1/accounts/{accountId}/webhooks/{subscriptionId}:
+    delete:
+      tags: [webhooks]
+      summary: Delete a webhook subscription
+      operationId: deleteWebhookSubscription
+      parameters:
+        - $ref: "#/components/parameters/AccountId"
+        - $ref: "#/components/parameters/SubscriptionId"
+      responses:
+        "204":
+          description: Subscription has been removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: token
+      description: |
+        Static operator token. The header MUST be present as
+        `Authorization: Bearer <token>` on every request other than
+        `GET /health`. The token is configured via the `MAXAPI_TOKEN`
+        environment variable on the gateway.
+
+  parameters:
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      description: Account identifier (e.g. `acc_KYOY6SXU9VRP7DUYBIP7IBDPS9`).
+      schema:
+        type: string
+        minLength: 4
+        maxLength: 64
+        pattern: "^[A-Za-z0-9_-]+$"
+    ChannelId:
+      name: channelId
+      in: path
+      required: true
+      description: |
+        MAX channel/chat id. Values are 64-bit signed integers exposed as
+        decimal strings (e.g. `-74082320910346`).
+      schema:
+        type: string
+        pattern: "^-?[0-9]+$"
+    MessageId:
+      name: messageId
+      in: path
+      required: true
+      description: MAX message id (decimal string).
+      schema:
+        type: string
+        pattern: "^[0-9]+$"
+    ScheduleId:
+      name: scheduleId
+      in: path
+      required: true
+      schema:
+        type: string
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+    SubscriptionId:
+      name: subscriptionId
+      in: path
+      required: true
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of items per page.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque pagination cursor returned from a previous response.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional client-supplied key (8–128 chars) that lets the caller
+        retry a request without producing a duplicate. The first response
+        for a `(operation, key)` pair is cached for 24 hours.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+
+  responses:
+    BadRequest:
+      description: The request was rejected before validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Forbidden:
+      description: |
+        The bearer token is valid but the underlying MAX account is not
+        allowed to perform this action on the target channel.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: The requested resource does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: |
+        The resource exists but its current state is incompatible with the
+        request (e.g. cancelling an already-published job, scheduling a
+        post in the past).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PayloadTooLarge:
+      description: The uploaded payload exceeds the configured size limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationFailed:
+      description: Request body / query parameters failed schema validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationErrorResponse"
+    TooManyRequests:
+      description: Rate limit hit — see the `Retry-After` header.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: The upstream MAX session is unavailable or returned an error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    # --- Common envelopes ---------------------------------------------------
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Machine-readable error code, e.g. `unauthorized`, `validation_failed`, `text_too_long`.
+        message:
+          type: string
+        request_id:
+          type: string
+          nullable: true
+        retryable:
+          type: boolean
+          default: false
+          description: |
+            `true` when the caller can safely retry after a back-off (set
+            on `429` and `503`).
+
+    ValidationIssue:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: Dotted path of the offending field (e.g. `media.0.type`).
+        message:
+          type: string
+        code:
+          type: string
+          nullable: true
+
+    ValidationErrorResponse:
+      allOf:
+        - $ref: "#/components/schemas/ErrorResponse"
+        - type: object
+          required: [errors]
+          properties:
+            errors:
+              type: array
+              items:
+                $ref: "#/components/schemas/ValidationIssue"
+
+    SuccessResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          default: true
+
+    PageMeta:
+      type: object
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+
+    # --- Health -------------------------------------------------------------
+
+    HealthStatus:
+      type: string
+      enum: [ok, degraded]
+
+    UpstreamStatus:
+      type: string
+      enum: [ok, degraded, unavailable]
+
+    HealthResponse:
+      type: object
+      required: [status, version, time]
+      properties:
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        version:
+          type: string
+          example: "2.0.0"
+        time:
+          type: string
+          format: date-time
+        max_upstream:
+          $ref: "#/components/schemas/UpstreamStatus"
+
+    # --- Accounts -----------------------------------------------------------
+
+    AccountSessionState:
+      type: string
+      description: Lifecycle state of the underlying PyMax session.
+      enum:
+        - connected
+        - login_required
+        - challenge_required
+        - rate_limited
+        - disabled
+
+    Account:
+      type: object
+      required: [account_id, display_name, status, created_at]
+      properties:
+        account_id:
+          type: string
+          example: "acc_KYOY6SXU9VRP7DUYBIP7IBDPS9"
+        max_user_id:
+          type: string
+          nullable: true
+          description: Numeric MAX user id of the connected account.
+        phone_masked:
+          type: string
+          nullable: true
+          example: "+7******5114"
+        username:
+          type: string
+          nullable: true
+        display_name:
+          type: string
+        status:
+          $ref: "#/components/schemas/AccountSessionState"
+        last_activity_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    AccountListResponse:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/Account"
+
+    AccountStatus:
+      type: object
+      required: [account_id, status, can_publish, checked_at]
+      properties:
+        account_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/AccountSessionState"
+        can_publish:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+        checked_at:
+          type: string
+          format: date-time
+
+    LoginDelivery:
+      type: string
+      enum: [sms, push, in_app]
+
+    StartLoginRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          minLength: 4
+          maxLength: 32
+          description: E.164 phone number, e.g. `+79991234567`.
+          example: "+79991234567"
+        device_name:
+          type: string
+          default: "wb-channel-poster"
+          description: Cosmetic device label shown in the user's MAX Sessions list.
+        callback_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Optional URL the gateway will POST to when the session reaches `connected`.
+
+    StartLoginResponse:
+      type: object
+      required: [challenge_id, expires_at, delivery]
+      properties:
+        challenge_id:
+          type: string
+          example: "chg_6SOBNHBE3XZSWVYCG2ESZPTEKG"
+        expires_at:
+          type: string
+          format: date-time
+        delivery:
+          $ref: "#/components/schemas/LoginDelivery"
+        masked_destination:
+          type: string
+          nullable: true
+          example: "+7******1234"
+
+    VerifyLoginRequest:
+      type: object
+      required: [challenge_id, code]
+      properties:
+        challenge_id:
+          type: string
+        code:
+          type: string
+          minLength: 4
+          maxLength: 12
+          description: One-time code delivered via the `delivery` channel.
+          example: "409761"
+        two_factor_password:
+          type: string
+          nullable: true
+          description: Cloud password, if 2FA is enabled on the account.
+
+    VerifyLoginResponse:
+      type: object
+      required: [account]
+      properties:
+        account:
+          $ref: "#/components/schemas/Account"
+
+    # --- Channels -----------------------------------------------------------
+
+    ChannelRole:
+      type: string
+      enum: [owner, admin, editor, member, unknown]
+
+    ChannelType:
+      type: string
+      enum: [channel, chat]
+
+    ChannelPermissions:
+      type: object
+      required: [can_publish, can_edit, can_delete, can_pin]
+      properties:
+        can_publish:
+          type: boolean
+        can_edit:
+          type: boolean
+        can_delete:
+          type: boolean
+        can_pin:
+          type: boolean
+        can_upload_media:
+          type: boolean
+          default: true
+        reason:
+          type: string
+          nullable: true
+          description: Human-readable reason when any of the flags above is `false`.
+
+    Channel:
+      type: object
+      required: [channel_id, title, type, role, permissions]
+      properties:
+        channel_id:
+          type: string
+          example: "-74082320910346"
+        title:
+          type: string
+        username:
+          type: string
+          nullable: true
+        public_link:
+          type: string
+          nullable: true
+        type:
+          $ref: "#/components/schemas/ChannelType"
+        role:
+          $ref: "#/components/schemas/ChannelRole"
+        members_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        permissions:
+          $ref: "#/components/schemas/ChannelPermissions"
+        raw:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Backend-specific raw payload. Treat as opaque.
+
+    ChannelListResponse:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/Channel"
+
+    # --- Media --------------------------------------------------------------
+
+    MediaType:
+      type: string
+      enum: [image, video, audio, document]
+
+    MediaStatus:
+      type: string
+      enum: [uploaded, processing, ready, failed]
+
+    Media:
+      type: object
+      required: [media_id, type, status, created_at]
+      properties:
+        media_id:
+          type: string
+          example: "med_IPRL3F3HFSWXSP1PTX3ZSXRFPG"
+        type:
+          $ref: "#/components/schemas/MediaType"
+        status:
+          $ref: "#/components/schemas/MediaStatus"
+        url:
+          type: string
+          nullable: true
+          description: |
+            Best-effort URL or local-path representation of the asset.
+            Production deployments may serve this through a signed CDN.
+        filename:
+          type: string
+          nullable: true
+        mime_type:
+          type: string
+          nullable: true
+        size_bytes:
+          type: integer
+          minimum: 0
+          nullable: true
+        max_attachment:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Backend-specific descriptor (PyMax stores `local_path` here).
+            Carried through to subsequent publish/edit calls so the
+            backend can reuse the upload without round-tripping the file.
+        created_at:
+          type: string
+          format: date-time
+
+    MediaImportRequest:
+      type: object
+      required: [url, type]
+      properties:
+        url:
+          type: string
+          format: uri
+        type:
+          $ref: "#/components/schemas/MediaType"
+        filename:
+          type: string
+          nullable: true
+        caption:
+          type: string
+          maxLength: 1024
+          nullable: true
+        source_post_id:
+          type: string
+          nullable: true
+          description: Optional reference to the upstream content's identifier (used for analytics/de-dup).
+
+    # --- Posts: text formatting & elements ---------------------------------
+
+    TextFormat:
+      type: string
+      enum: [plain, markdown, html]
+      description: |
+        Drives how `PublishPostRequest.text` is interpreted.
+
+        * `plain` — no parsing; bare URLs are auto-linked by MAX.
+        * `markdown` — small Markdown subset (see API description).
+        * `html` — currently treated as `plain` (no HTML renderer in the
+          underlying wire protocol).
+
+    MessageElementType:
+      type: string
+      description: |
+        Wire-level element type emitted into the MAX `MessageElement`
+        array when the gateway renders a post with `format = "markdown"`.
+        Most callers never construct these directly — they're documented
+        here so integrators understand what ends up on the wire.
+      enum:
+        - LINK
+        - STRONG
+        - UNDERLINE
+        - STRIKETHROUGH
+        - EMPHASIZED
+
+    MessageElementAttributes:
+      type: object
+      additionalProperties: true
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Target URL when `type = LINK`. Schemes `http`, `https`, `mailto`, `tg`, `max` are accepted.
+
+    MessageElement:
+      type: object
+      description: |
+        Mirror of the on-the-wire MAX `MessageElement`. The gateway emits
+        these for every formatted span when `format = "markdown"`. They
+        are surfaced in this schema for parity with backend logs and for
+        clients that want to inspect what was actually sent. Posts in the
+        contract use Markdown sugar; they never need to send
+        `MessageElement` directly.
+      required: [type, length]
+      properties:
+        type:
+          $ref: "#/components/schemas/MessageElementType"
+        from:
+          type: integer
+          minimum: 0
+          description: 0-based offset into the cleaned (markdown-stripped) text.
+        length:
+          type: integer
+          minimum: 1
+          description: Length of the span in code points of the cleaned text.
+        attributes:
+          $ref: "#/components/schemas/MessageElementAttributes"
+
+    InlineButtonType:
+      type: string
+      enum: [link, callback, clipboard]
+
+    InlineButton:
+      type: object
+      required: [type, text]
+      properties:
+        type:
+          $ref: "#/components/schemas/InlineButtonType"
+        text:
+          type: string
+          minLength: 1
+          maxLength: 64
+        url:
+          type: string
+          format: uri
+          nullable: true
+          description: Required for `type = link`.
+        payload:
+          type: string
+          maxLength: 1024
+          nullable: true
+          description: Required for `type = callback` / `clipboard`.
+
+    InlineKeyboard:
+      type: object
+      properties:
+        rows:
+          type: array
+          maxItems: 30
+          description: |
+            Up to 30 rows of buttons. Each row holds a list of
+            `InlineButton`. Best-effort — see _Inline keyboards_ in the
+            API description for current backend support.
+          items:
+            type: array
+            items:
+              $ref: "#/components/schemas/InlineButton"
+
+    MediaRef:
+      type: object
+      description: |
+        A reference to media attached to a post. Either `media_id` (from a
+        previous `POST /media`) **or** `url` (server-side fetch) must be
+        provided. `type` is required and must match the asset.
+      required: [type]
+      properties:
+        media_id:
+          type: string
+          nullable: true
+        url:
+          type: string
+          format: uri
+          nullable: true
+        type:
+          $ref: "#/components/schemas/MediaType"
+        caption:
+          type: string
+          maxLength: 1024
+          nullable: true
+        position:
+          type: integer
+          minimum: 1
+          default: 1
+          description: 1-based ordering inside the post's `media` array.
+
+    PublishOptions:
+      type: object
+      description: Per-post controls applied during publication.
+      properties:
+        disable_notification:
+          type: boolean
+          default: false
+          description: When `true`, subscribers are not pinged for the post.
+        pin_after_publish:
+          type: boolean
+          default: false
+          description: Pin the new post immediately after it is sent.
+        remove_previous_pin:
+          type: boolean
+          default: false
+          description: |
+            When pinning, unpin any currently-pinned post first. Only
+            considered if `pin_after_publish = true`.
+        link_preview:
+          type: boolean
+          default: true
+          description: |
+            Allow MAX clients to render a rich preview for the first URL
+            in the post text. Set to `false` to suppress previews entirely.
+        dry_run:
+          type: boolean
+          default: false
+          description: |
+            Validate and render the payload without contacting MAX.
+            The response shape is identical to a real publish, but
+            `message_id` is a synthetic value (`dryrun_*`) and the post
+            is not stored.
+
+    PublishPostRequest:
+      type: object
+      description: |
+        The full publish payload. See _Text formatting & word-links_ in
+        the API description for examples covering Markdown links, bold,
+        underline, strikethrough and italic. Up to 10 media items can be
+        attached via `media`.
+      required: [text]
+      properties:
+        external_id:
+          type: string
+          nullable: true
+          description: Caller-controlled correlation id (logged, returned in `PublishedPost`).
+        title:
+          type: string
+          maxLength: 256
+          nullable: true
+          description: Optional title shown above the post body in some clients.
+        text:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: |
+            Post body. When `format = "markdown"`, may include
+            `[label](url)` for word-links, `**bold**`, `__underline__`,
+            `~~strike~~`, `*italic*`. Otherwise sent verbatim.
+        format:
+          $ref: "#/components/schemas/TextFormat"
+        media:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/MediaRef"
+        inline_keyboard:
+          $ref: "#/components/schemas/InlineKeyboard"
+        options:
+          $ref: "#/components/schemas/PublishOptions"
+        source:
+          type: string
+          nullable: true
+          description: Free-form provenance label (e.g. `wb_parser`, `manual`).
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Caller-controlled metadata, stored verbatim.
+
+    EditPostRequest:
+      type: object
+      description: |
+        Partial update of an already-published post. All fields are
+        optional; only the ones present are applied. Pass `media: []` to
+        clear all attachments, or omit the field to keep them.
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          nullable: true
+        format:
+          $ref: "#/components/schemas/TextFormat"
+        media:
+          type: array
+          maxItems: 10
+          nullable: true
+          items:
+            $ref: "#/components/schemas/MediaRef"
+        inline_keyboard:
+          $ref: "#/components/schemas/InlineKeyboard"
+        metadata:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    PinPostRequest:
+      type: object
+      properties:
+        notify_subscribers:
+          type: boolean
+          default: false
+
+    PostValidationResult:
+      type: object
+      required: [valid, normalized]
+      properties:
+        valid:
+          type: boolean
+        normalized:
+          $ref: "#/components/schemas/PublishPostRequest"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/ValidationIssue"
+
+    PublishedPostStatus:
+      type: string
+      enum: [published, edited, deleted]
+
+    PublishedPost:
+      type: object
+      required: [message_id, channel_id, status, published_at]
+      properties:
+        message_id:
+          type: string
+          example: "116478244738399936"
+        channel_id:
+          type: string
+        external_id:
+          type: string
+          nullable: true
+        status:
+          $ref: "#/components/schemas/PublishedPostStatus"
+        text:
+          type: string
+          nullable: true
+          description: |
+            Echo of the request text. Markdown source is preserved here;
+            on the wire the post stores cleaned text + `MessageElement`
+            entries.
+        format:
+          $ref: "#/components/schemas/TextFormat"
+        permalink:
+          type: string
+          nullable: true
+        media:
+          type: array
+          items:
+            $ref: "#/components/schemas/Media"
+        pinned:
+          type: boolean
+          default: false
+        published_at:
+          type: string
+          format: date-time
+        edited_at:
+          type: string
+          format: date-time
+          nullable: true
+        raw_response:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Backend-specific raw response (debug only).
+
+    PostListResponse:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/PublishedPost"
+
+    PostMetrics:
+      type: object
+      required: [message_id, collected_at]
+      properties:
+        message_id:
+          type: string
+        views_count:
+          type: integer
+          minimum: 0
+          default: 0
+        reactions_total:
+          type: integer
+          minimum: 0
+          default: 0
+        reaction_breakdown:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+          description: Reaction emoji → count.
+        comments_count:
+          type: integer
+          minimum: 0
+          default: 0
+        forwards_count:
+          type: integer
+          minimum: 0
+          default: 0
+        collected_at:
+          type: string
+          format: date-time
+
+    # --- Schedules ----------------------------------------------------------
+
+    ScheduledPostStatus:
+      type: string
+      enum: [scheduled, publishing, published, failed, cancelled]
+
+    SchedulePostRequest:
+      type: object
+      required: [channel_id, publish_at, post]
+      properties:
+        channel_id:
+          type: string
+        publish_at:
+          type: string
+          format: date-time
+          description: UTC instant in the future.
+        post:
+          $ref: "#/components/schemas/PublishPostRequest"
+        timezone:
+          type: string
+          default: "UTC"
+          description: Informational; `publish_at` is always interpreted as UTC.
+
+    UpdateScheduledPostRequest:
+      type: object
+      properties:
+        publish_at:
+          type: string
+          format: date-time
+          nullable: true
+        post:
+          $ref: "#/components/schemas/PublishPostRequest"
+
+    ScheduledPost:
+      type: object
+      required: [schedule_id, account_id, channel_id, status, publish_at, post, created_at]
+      properties:
+        schedule_id:
+          type: string
+        account_id:
+          type: string
+        channel_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/ScheduledPostStatus"
+        publish_at:
+          type: string
+          format: date-time
+        post:
+          $ref: "#/components/schemas/PublishPostRequest"
+        published_post:
+          $ref: "#/components/schemas/PublishedPost"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ScheduledPostListResponse:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/ScheduledPost"
+
+    # --- Publication jobs (ReadyPost pipeline) ------------------------------
+
+    PublicationJobMode:
+      type: string
+      enum: [auto, publish_now, schedule, dry_run]
+
+    PublicationJobStatus:
+      type: string
+      enum:
+        - accepted
+        - validating
+        - importing_media
+        - scheduled
+        - publishing
+        - published
+        - failed
+        - cancelled
+        - expired
+
+    ReadyPostType:
+      type: string
+      enum: [single, collection, custom]
+
+    ReadyPostParseMode:
+      type: string
+      enum: [markdown, html]
+
+    ReadyPostMediaType:
+      type: string
+      enum: [photo, image, video, document]
+
+    ReadyPostMedia:
+      type: object
+      required: [position, url]
+      properties:
+        position:
+          type: integer
+          minimum: 1
+        article_id:
+          type: string
+          nullable: true
+        url:
+          type: string
+          format: uri
+        local_path:
+          type: string
+          nullable: true
+        type:
+          $ref: "#/components/schemas/ReadyPostMediaType"
+        caption:
+          type: string
+          nullable: true
+
+    ReadyPostItem:
+      type: object
+      required: [position, article_id, title, displayed_url]
+      properties:
+        position:
+          type: integer
+          minimum: 1
+        article_id:
+          type: string
+        title:
+          type: string
+        short_title:
+          type: string
+          nullable: true
+        price:
+          type: integer
+          nullable: true
+        old_price:
+          type: integer
+          nullable: true
+        discount_percent:
+          type: integer
+          nullable: true
+        rating:
+          type: number
+          nullable: true
+        feedbacks_count:
+          type: integer
+          nullable: true
+        displayed_url:
+          type: string
+        canonical_url:
+          type: string
+          nullable: true
+        affiliate_url:
+          type: string
+          nullable: true
+        main_image_url:
+          type: string
+          nullable: true
+        reason_for_selection:
+          type: string
+          nullable: true
+        risk_flags:
+          type: array
+          items:
+            type: string
+
+    ReadyPostButton:
+      type: object
+      required: [text, url]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 64
+        url:
+          type: string
+          format: uri
+
+    ReactionsHint:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+          default: true
+        text:
+          type: string
+          nullable: true
+
+    ReadyPost:
+      type: object
+      required: [post_id, post_type, title, text, fresh_until]
+      properties:
+        post_id:
+          type: string
+        post_type:
+          $ref: "#/components/schemas/ReadyPostType"
+        title:
+          type: string
+        text:
+          type: string
+          minLength: 1
+        parse_mode:
+          $ref: "#/components/schemas/ReadyPostParseMode"
+        media:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReadyPostMedia"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReadyPostItem"
+        buttons:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReadyPostButton"
+        reactions_hint:
+          $ref: "#/components/schemas/ReactionsHint"
+        planned_at:
+          type: string
+          format: date-time
+          nullable: true
+        fresh_until:
+          type: string
+          format: date-time
+        publication_status:
+          type: string
+          default: ready
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        source:
+          type: string
+          default: wb_parser
+        version:
+          type: string
+          default: "1"
+
+    CreatePublicationJobRequest:
+      type: object
+      required: [channel_id, ready_post]
+      properties:
+        channel_id:
+          type: string
+        ready_post:
+          $ref: "#/components/schemas/ReadyPost"
+        mode:
+          $ref: "#/components/schemas/PublicationJobMode"
+        publish_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Required when `mode = schedule`.
+        options:
+          $ref: "#/components/schemas/PublishOptions"
+
+    PublicationJob:
+      type: object
+      required: [job_id, account_id, channel_id, status, ready_post, created_at]
+      properties:
+        job_id:
+          type: string
+        account_id:
+          type: string
+        channel_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/PublicationJobStatus"
+        ready_post:
+          $ref: "#/components/schemas/ReadyPost"
+        published_post:
+          $ref: "#/components/schemas/PublishedPost"
+        scheduled_post:
+          $ref: "#/components/schemas/ScheduledPost"
+        attempts:
+          type: integer
+          minimum: 0
+          default: 0
+        error:
+          $ref: "#/components/schemas/ErrorResponse"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    PublicationJobListResponse:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/PublicationJob"
+
+    # --- Webhooks -----------------------------------------------------------
+
+    WebhookEventType:
+      type: string
+      enum:
+        - publication.accepted
+        - publication.scheduled
+        - publication.published
+        - publication.failed
+        - publication.cancelled
+        - metrics.collected
+
+    CreateWebhookSubscriptionRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Caller-hosted endpoint that receives `PublicationEvent` payloads.
+        secret:
+          type: string
+          minLength: 16
+          maxLength: 256
+          nullable: true
+          description: Shared secret used to compute the HMAC-SHA256 delivery signature.
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/WebhookEventType"
+
+    WebhookSubscription:
+      type: object
+      required: [subscription_id, url, events, created_at]
+      properties:
+        subscription_id:
+          type: string
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/WebhookEventType"
+        created_at:
+          type: string
+          format: date-time
+
+    WebhookSubscriptionListResponse:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/WebhookSubscription"
+
+    PublicationEvent:
+      type: object
+      description: Body of an outgoing webhook delivery.
+      required: [event_id, event_type, occurred_at, job]
+      properties:
+        event_id:
+          type: string
+        event_type:
+          $ref: "#/components/schemas/WebhookEventType"
+        occurred_at:
+          type: string
+          format: date-time
+        job:
+          $ref: "#/components/schemas/PublicationJob"
+        metrics:
+          $ref: "#/components/schemas/PostMetrics"
+        signature:
+          type: string
+          nullable: true
+          description: |
+            Hex-encoded HMAC-SHA256 of `event_id + "." + occurred_at`,
+            keyed with the subscription `secret`. Use this to verify the
+            delivery server-side.

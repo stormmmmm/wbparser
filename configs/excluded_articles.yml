@@ -1,0 +1,4 @@
+excluded_articles:
+  - article_id: "00000000"
+    reason: "manual_block"
+    expires_at: null

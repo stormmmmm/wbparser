@@ -1,0 +1,42 @@
+{
+  "data": {
+    "products": [
+      {
+        "id": 12345678,
+        "name": "Органайзер для косметики пастельный",
+        "brand": "Home Cozy",
+        "categoryName": "Интерьер и декор",
+        "subjectName": "Органайзеры",
+        "salePriceU": 69900,
+        "priceU": 129900,
+        "sale": 46,
+        "reviewRating": 4.8,
+        "feedbacks": 156,
+        "images": [
+          "https://example.com/12345678-1.jpg",
+          "https://example.com/12345678-2.jpg",
+          "https://example.com/12345678-3.jpg"
+        ],
+        "link": "https://www.wildberries.ru/catalog/12345678/detail.aspx"
+      },
+      {
+        "id": 23456789,
+        "name": "Ночник с мягким светом",
+        "brand": "LightMood",
+        "categoryName": "Интерьер и декор",
+        "subjectName": "Ночники",
+        "salePriceU": 89000,
+        "priceU": 149900,
+        "sale": 41,
+        "reviewRating": 4.7,
+        "feedbacks": 212,
+        "images": [
+          "https://example.com/23456789-1.jpg",
+          "https://example.com/23456789-2.jpg",
+          "https://example.com/23456789-3.jpg"
+        ],
+        "link": "https://www.wildberries.ru/catalog/23456789/detail.aspx"
+      }
+    ]
+  }
+}
