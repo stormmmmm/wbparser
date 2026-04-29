@@ -132,6 +132,32 @@ def test_plan_day_assigns_slots_to_unplanned_ready_posts():
             assert post.planned_at.replace(tzinfo=timezone.utc) if post.planned_at.tzinfo is None else post.planned_at == expected
 
 
+def test_plan_day_reuses_existing_slot_assignment():
+    settings = get_settings()
+    target = date(2026, 5, 1)
+    slot = SlotSpec(time="10:00", type="collection")
+    with session_scope() as session:
+        _make_ready_post(session, post_id="c-1", post_type="collection", article_id="100")
+        _make_ready_post(session, post_id="c-2", post_type="collection", article_id="101")
+
+    planner = DailyPlannerService(settings)
+    with session_scope() as session:
+        first = planner.plan_day(session, [slot], target_date=target, tz_name="Europe/Moscow")
+    with session_scope() as session:
+        second = planner.plan_day(session, [slot], target_date=target, tz_name="Europe/Moscow")
+        slot_at = _slot_to_utc(target, slot.time, "Europe/Moscow").replace(tzinfo=None)
+        assigned = [
+            post.id
+            for post in session.query(Post)
+            .filter(Post.planned_at == slot_at)
+            .filter(Post.publication_status == "ready")
+            .all()
+        ]
+
+    assert first.slots[0].post_id == second.slots[0].post_id
+    assert assigned == [first.slots[0].post_id]
+
+
 def test_plan_day_skips_when_pool_empty():
     settings = get_settings()
     with session_scope() as session:

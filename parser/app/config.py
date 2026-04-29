@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     WB_RATE_LIMIT_PER_SECOND: float = 2.0
     WB_REQUEST_TIMEOUT_SECONDS: int = 20
     WB_MAX_CONCURRENCY: int = 5
+    WB_PROXY_URL: str = ""
+    WB_PROXY_POOL_FILES: str = ""
+    WB_PROXY_ATTEMPTS_PER_REQUEST: int = 8
 
     AFFILIATE_ENABLED: bool = False
     AFFILIATE_BASE_URL: str = ""

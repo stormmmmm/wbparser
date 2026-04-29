@@ -71,6 +71,14 @@ def _classify_failure(exc: Exception) -> tuple[str, str, bool]:
     return "bridge_internal_error", f"{exc.__class__.__name__}: {exc}", False
 
 
+def _retry_after_seconds(code: str) -> int:
+    if code in {"transport_error", "http_429"}:
+        return 300
+    if code.startswith("http_5"):
+        return 300
+    return 120
+
+
 async def process_one(
     ready_post: dict[str, Any],
     *,
@@ -116,7 +124,11 @@ async def process_one(
             retryable,
         )
         await parser.mark_failed(
-            post_id_str, error_code=code, error_message=message, retryable=retryable
+            post_id_str,
+            error_code=code,
+            error_message=message,
+            retryable=retryable,
+            retry_after_seconds=_retry_after_seconds(code),
         )
         return "failed"
 
@@ -167,9 +179,14 @@ async def run_once(
     lock_ttl_seconds: int,
     batch_size: int,
     post_type: str | None = None,
+    include_unplanned: bool = True,
 ) -> list[str]:
     """Run a single publication cycle. Returns per-post outcomes."""
-    ready_posts = await parser.get_next_posts(limit=batch_size, post_type=post_type)
+    ready_posts = await parser.get_next_posts(
+        limit=batch_size,
+        post_type=post_type,
+        include_unplanned=include_unplanned,
+    )
     outcomes: list[str] = []
     for ready_post in ready_posts:
         outcome = await process_one(
@@ -195,20 +212,30 @@ async def run_loop(
     lock_ttl_seconds: int,
     batch_size: int,
     poll_interval_seconds: float,
+    include_unplanned: bool = True,
     stop_event: asyncio.Event | None = None,
 ) -> None:
     """Run the publication loop until ``stop_event`` is set."""
     stop = stop_event or asyncio.Event()
     while not stop.is_set():
-        outcomes = await run_once(
-            parser=parser,
-            maxapi=maxapi,
-            account_id=account_id,
-            channel_id=channel_id,
-            worker_id=worker_id,
-            lock_ttl_seconds=lock_ttl_seconds,
-            batch_size=batch_size,
-        )
+        try:
+            outcomes = await run_once(
+                parser=parser,
+                maxapi=maxapi,
+                account_id=account_id,
+                channel_id=channel_id,
+                worker_id=worker_id,
+                lock_ttl_seconds=lock_ttl_seconds,
+                batch_size=batch_size,
+                include_unplanned=include_unplanned,
+            )
+        except Exception as exc:  # noqa: BLE001 - loop should survive upstream restarts
+            log.warning("publication loop cycle failed: %s", exc)
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=poll_interval_seconds)
+            except TimeoutError:
+                pass
+            continue
         if not outcomes:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=poll_interval_seconds)

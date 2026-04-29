@@ -23,8 +23,26 @@ class PostBuilderService:
         base = short_title(product.title, 48) if product.title else "Находка дня с Wildberries"
         return f"{base} 😍"
 
+    def _selection_phrase(self, product: Product, candidate: SelectedCandidate) -> str:
+        reason = candidate.reason_for_selection or ""
+        if reason and not reason.startswith("visual="):
+            return reason
+        text = " ".join(
+            filter(
+                None,
+                [product.normalized_title, product.category_name or "", product.subject_name or ""],
+            )
+        )
+        if any(token in text for token in ("шапк", "y2k", "у2к")):
+            return "милый акцент для образа и прохладных прогулок"
+        if any(token in text for token in ("краб", "закол")):
+            return "быстро собирает волосы и красиво смотрится в образе"
+        if any(token in text for token in ("сумк", "украшен", "колье", "серьг")):
+            return "добавит образу аккуратный красивый акцент"
+        return "красивая и практичная находка"
+
     def _single_text(self, product: Product, candidate: SelectedCandidate) -> str:
-        adv1 = candidate.reason_for_selection or "красивая и практичная находка"
+        adv1 = self._selection_phrase(product, candidate)
         adv2 = (
             f"рейтинг {product.rating:.1f} и {product.feedbacks_count} отзывов"
             if product.rating and product.feedbacks_count
@@ -118,9 +136,13 @@ class PostBuilderService:
 
         cooldown_days = self.settings.DEFAULT_POST_COOLDOWN_DAYS
         eligible_rows: list[tuple[SelectedCandidate, Product]] = []
+        seen_articles: set[str] = set()
         for candidate, product in rows:
+            if product.article_id in seen_articles:
+                continue
             if Repository.is_article_on_cooldown(session, product.article_id, cooldown_days):
                 continue
+            seen_articles.add(product.article_id)
             eligible_rows.append((candidate, product))
 
         created_post_ids: list[str] = []

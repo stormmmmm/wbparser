@@ -181,3 +181,81 @@ cd bridge && . .venv/bin/activate && pytest -q
 на месте. Дальнейшие задачи (полноценный `pymax` backend в проде,
 web-UI, schedule из YAML, продакшен-БД для idempotency-store) — там
 же в § 8.
+
+---
+
+## Локальный боевой запуск на Windows
+
+Для текущего локального деплоя есть supervisor-скрипты в `scripts/`. Они
+поднимают и контролируют весь стек:
+
+- WB Parser: `http://127.0.0.1:8000`
+- MAX Gateway: `http://127.0.0.1:8080`
+- Bridge worker: `wb-bridge run-loop`
+- daily-cycle: запуск планирования в `04:00` по Москве
+
+Supervisor читает `.env`, хранит PID-файлы в `data/run/`, пишет логи в
+`data/logs/`.
+
+### Запустить или перезапустить
+
+Из корня репозитория:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\run_local_stack.ps1
+```
+
+Для фонового скрытого запуска:
+
+```powershell
+Start-Process powershell.exe `
+  -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','E:\wbchannel\scripts\run_local_stack.ps1') `
+  -WorkingDirectory 'E:\wbchannel' `
+  -WindowStyle Hidden
+```
+
+Если старый стек уже работает, `run_local_stack.ps1` останавливает процессы из
+PID-файлов и запускает свежий стек.
+
+### Остановить
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\stop_local_stack.ps1
+```
+
+### Проверить, что всё живо
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod http://127.0.0.1:8080/health
+Get-CimInstance Win32_Process |
+  Where-Object { $_.CommandLine -match 'uvicorn|wb-bridge|run_local_stack' } |
+  Select-Object ProcessId,ParentProcessId,CommandLine
+```
+
+Ожидаемый ответ health: `{"status":"ok", ...}` у обоих сервисов.
+
+### Логи
+
+```powershell
+Get-Content .\data\logs\local-stack-supervisor.log -Tail 50
+Get-Content .\data\logs\scheduler.log -Tail 50
+Get-ChildItem .\data\logs -Filter 'bridge-*.err.log' |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1 |
+  ForEach-Object { Get-Content $_.FullName -Tail 100 }
+```
+
+### Запустить планирование вручную
+
+Supervisor сам вызывает daily-cycle в `04:00` по Москве. Вручную:
+
+```powershell
+Invoke-WebRequest -Method Post -Uri http://127.0.0.1:8000/api/v1/admin/daily-cycle -TimeoutSec 900 -UseBasicParsing
+```
+
+### Посмотреть очередь публикаций
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/admin/status | ConvertTo-Json -Depth 8
+```

@@ -89,7 +89,7 @@ def build_publication_job_request(
     ready_post: dict[str, Any],
     *,
     channel_id: str,
-    mode: str = "auto",
+    mode: str = "publish_now",
     publish_at: str | None = None,
     options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:

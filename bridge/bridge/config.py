@@ -51,6 +51,13 @@ class BridgeSettings(BaseSettings):
         le=10,
         description="How many posts to pull from the parser per cycle.",
     )
+    publish_unplanned_posts: bool = Field(
+        default=False,
+        description=(
+            "Whether the bridge loop may publish ready posts without planned_at. "
+            "Production should keep this false so only scheduled posts are emitted."
+        ),
+    )
 
     # ---- MAX gateway side -----------------------------------------------
     maxapi_base_url: str = Field(

@@ -29,9 +29,13 @@ class ParserClient:
         return path
 
     async def get_next_posts(
-        self, *, limit: int = 1, post_type: str | None = None
+        self,
+        *,
+        limit: int = 1,
+        post_type: str | None = None,
+        include_unplanned: bool = True,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"limit": limit}
+        params: dict[str, Any] = {"limit": limit, "include_unplanned": include_unplanned}
         if post_type is not None:
             params["post_type"] = post_type
         response = await self._client.get(self._url("/api/v1/posts/next"), params=params)
@@ -78,6 +82,7 @@ class ParserClient:
         error_code: str,
         error_message: str,
         retryable: bool = True,
+        retry_after_seconds: int = 300,
     ) -> dict[str, Any]:
         response = await self._client.post(
             self._url(f"/api/v1/posts/{post_id}/failed"),
@@ -85,6 +90,7 @@ class ParserClient:
                 "error_code": error_code,
                 "error_message": error_message,
                 "retryable": retryable,
+                "retry_after_seconds": retry_after_seconds,
             },
         )
         response.raise_for_status()

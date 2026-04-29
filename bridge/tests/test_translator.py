@@ -84,7 +84,7 @@ def test_build_publication_job_request_carries_addressing_outside_ready_post():
     body = build_publication_job_request(payload, channel_id="ch-test")
 
     assert body["channel_id"] == "ch-test"
-    assert body["mode"] == "auto"
+    assert body["mode"] == "publish_now"
     assert "publish_at" not in body
     assert "options" not in body
 

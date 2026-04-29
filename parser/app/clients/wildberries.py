@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 from pathlib import Path
 from time import monotonic
 from typing import Any
+from urllib.parse import quote
 
+from curl_cffi import requests as curl_requests
 import httpx
 
 from app.config import Settings
@@ -18,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 
 class WildberriesClient:
-    SEARCH_URL = "https://search.wb.ru/exactmatch/ru/common/v13/search"
-    CARD_DETAIL_URL = "https://card.wb.ru/cards/v2/detail"
+    SEARCH_URL = "https://search.wb.ru/exactmatch/ru/common/v14/search"
+    CARD_DETAIL_URL = "https://card.wb.ru/cards/v4/detail"
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -35,6 +38,12 @@ class WildberriesClient:
         self._semaphore = asyncio.Semaphore(max(1, settings.WB_MAX_CONCURRENCY))
         self._rate_lock = asyncio.Lock()
         self._last_request_at = 0.0
+        self._proxy_url = (
+            settings.WB_PROXY_URL
+            or os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+        )
+        self._proxy_pool = self._load_proxy_pool()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -63,15 +72,7 @@ class WildberriesClient:
         async def _call() -> dict[str, Any]:
             async with self._semaphore:
                 await self._respect_rate_limit()
-                response = await self._client.get(url, params=params)
-                if response.status_code in (429, 500, 502, 503, 504):
-                    raise httpx.HTTPStatusError(
-                        f"retryable status: {response.status_code}",
-                        request=response.request,
-                        response=response,
-                    )
-                response.raise_for_status()
-                payload = response.json()
+                payload = await asyncio.to_thread(self._request_json_browser_like, url, params)
                 self._cache_raw_payload(payload, cache_tag or "wb")
                 return payload
 
@@ -86,6 +87,101 @@ class WildberriesClient:
             logger.error("WB request failed url=%s params=%s error=%s", url, params, exc)
             raise
 
+    def _request_json_browser_like(
+        self, url: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for proxy_url in self._proxy_candidates():
+            proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+            try:
+                response = curl_requests.get(
+                    url,
+                    params=params,
+                    headers=self.headers,
+                    proxies=proxies,
+                    impersonate="chrome124",
+                    timeout=self.settings.WB_REQUEST_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # noqa: BLE001 - rotate past bad proxy endpoints
+                last_error = exc
+                continue
+            if response.status_code in (429, 500, 502, 503, 504):
+                last_error = httpx.HTTPStatusError(
+                    f"retryable status: {response.status_code}",
+                    request=httpx.Request("GET", url, params=params),
+                    response=httpx.Response(response.status_code, text=response.text),
+                )
+                continue
+            if response.status_code >= 400:
+                raise httpx.HTTPStatusError(
+                    f"status: {response.status_code}",
+                    request=httpx.Request("GET", url, params=params),
+                    response=httpx.Response(response.status_code, text=response.text),
+                )
+            return response.json()
+        if last_error is not None:
+            raise last_error
+        raise ValueError("WB request did not produce a response")
+
+    def _proxy_candidates(self) -> list[str | None]:
+        if self._proxy_pool:
+            attempts = min(
+                max(1, self.settings.WB_PROXY_ATTEMPTS_PER_REQUEST),
+                len(self._proxy_pool),
+            )
+            start = random.randrange(len(self._proxy_pool))
+            return [
+                self._proxy_pool[(start + offset) % len(self._proxy_pool)]
+                for offset in range(attempts)
+            ]
+        if self._proxy_url:
+            return [self._proxy_url]
+        return [None]
+
+    def _load_proxy_pool(self) -> list[str]:
+        file_names = [
+            item.strip()
+            for item in self.settings.WB_PROXY_POOL_FILES.replace(",", ";").split(";")
+            if item.strip()
+        ]
+        proxies: list[str] = []
+        for file_name in file_names:
+            path = Path(file_name)
+            if not path.exists():
+                logger.warning("WB proxy pool file does not exist: %s", path)
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                logger.warning("Failed to read WB proxy pool file %s: %s", path, exc)
+                continue
+            for line in lines:
+                proxy = self._format_proxy_url(line.strip())
+                if proxy:
+                    proxies.append(proxy)
+        if self._proxy_url:
+            proxies.insert(0, self._proxy_url)
+        return list(dict.fromkeys(proxies))
+
+    @staticmethod
+    def _format_proxy_url(line: str) -> str | None:
+        if not line:
+            return None
+        if line.startswith(("http://", "https://")):
+            return line
+        try:
+            host, port, user, password = line.split(":", 3)
+        except ValueError:
+            logger.warning("Ignoring malformed WB proxy entry")
+            return None
+        if host == "pool.proxys.io":
+            # The pool currently presents this certificate on HTTPS CONNECT.
+            host = "pool2.infatica.io"
+        return (
+            f"https://{quote(user, safe='')}:{quote(password, safe='')}"
+            f"@{host}:{port}"
+        )
+
     def _cache_raw_payload(self, payload: dict[str, Any], tag: str) -> Path:
         self.settings.raw_cache_dir.mkdir(parents=True, exist_ok=True)
         file_name = f"{tag}-{int(monotonic() * 1000)}-{random.randint(1000, 9999)}.json"
@@ -95,8 +191,20 @@ class WildberriesClient:
 
     @staticmethod
     def _extract_products_from_search(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        top_level = payload.get("products")
+        if isinstance(top_level, list) and top_level:
+            return top_level
         data = payload.get("data", {})
         products = data.get("products") or data.get("items") or []
+        if isinstance(products, list) and products:
+            return products
+        search_result = payload.get("search_result", {})
+        if isinstance(search_result, dict):
+            products = search_result.get("products") or []
+            if isinstance(products, list):
+                return products
+        if isinstance(top_level, list):
+            return top_level
         if isinstance(products, list):
             return products
         return []

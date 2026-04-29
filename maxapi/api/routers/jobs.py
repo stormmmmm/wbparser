@@ -9,7 +9,7 @@ from fastapi import APIRouter, Query, status
 
 from api.backends import media_to_upstream
 from api.deps import AuthDep, BackendDep, CursorDep, IdempotencyKeyDep, LimitDep, StorageDep
-from api.errors import ConflictError
+from api.errors import ConflictError, ForbiddenError, NotFoundError
 from api.ids import new_id
 from api.models.jobs import (
     CreatePublicationJobRequest,
@@ -31,7 +31,9 @@ from api.models.posts import (
 )
 from api.models.schedules import ScheduledPost, ScheduledPostStatus
 from api.pagination import paginate
+from api.routers.channels import _to_channel
 from api.storage import (
+    Storage,
     materialize_media_from_refs,
     materialize_published_post,
     now_utc,
@@ -87,6 +89,31 @@ def _ready_post_to_publish_request(ready_post: ReadyPost) -> PublishPostRequest:
     )
 
 
+async def _ensure_writable_channel(
+    storage: Storage,
+    backend,
+    account_id: str,
+    channel_id: str,
+) -> None:
+    try:
+        channel = storage.get_channel(account_id, channel_id)
+    except Exception:
+        storage.get_account(account_id)
+        upstream = await backend.resolve_channel(account_id=account_id, link=channel_id)
+        if upstream is None:
+            for candidate in await backend.list_channels(account_id=account_id):
+                if str(candidate.channel_id) == str(channel_id):
+                    upstream = candidate
+                    break
+        if upstream is None:
+            raise NotFoundError(
+                "Channel not found for this account.", code="channel_not_found"
+            ) from None
+        channel = storage.upsert_channel(account_id, _to_channel(upstream))
+    if not channel.permissions.can_publish:
+        raise ForbiddenError("Account cannot publish to this channel.")
+
+
 def _ready_media_type(value) -> MediaType:
     mapping = {
         "photo": MediaType.image,
@@ -135,7 +162,7 @@ async def create_publication_job(
     _auth: AuthDep,
     idempotency_key: IdempotencyKeyDep,
 ) -> PublicationJob:
-    storage.get_channel(account_id, payload.channel_id)
+    await _ensure_writable_channel(storage, backend, account_id, payload.channel_id)
     publish_request = _ready_post_to_publish_request(payload.ready_post)
     options = payload.options or PublishOptions()
 

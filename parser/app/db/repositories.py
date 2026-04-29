@@ -214,6 +214,10 @@ class Repository:
         post.fresh_until = fresh_until
         post.planned_at = planned_at
         post.publication_status = publication_status
+        if publication_status != "published":
+            post.telegram_message_id = None
+            post.telegram_url = None
+            post.published_at = None
         post.updated_at = utcnow()
         session.flush()
         return post
@@ -225,11 +229,16 @@ class Repository:
         items: list[dict[str, Any]],
     ) -> None:
         session.execute(delete(PostItem).where(PostItem.post_id == post_id))
+        seen_articles: set[str] = set()
         for item in items:
+            article_id = str(item["article_id"])
+            if article_id in seen_articles:
+                continue
+            seen_articles.add(article_id)
             session.add(
                 PostItem(
                     post_id=post_id,
-                    article_id=item["article_id"],
+                    article_id=article_id,
                     position=item["position"],
                     displayed_price=item.get("price"),
                     displayed_old_price=item.get("old_price"),
@@ -353,17 +362,27 @@ class Repository:
 
     @staticmethod
     def mark_post_failed(
-        session: Session, post_id: str | int, retryable: bool, error_message: str | None = None
+        session: Session,
+        post_id: str | int,
+        retryable: bool,
+        error_message: str | None = None,
+        retry_after_seconds: int = 300,
     ) -> Post | None:
         post = Repository.get_post(session, post_id)
         if post is None:
             return None
+        now = utcnow()
         post.publication_status = "ready" if retryable else "failed"
         post.lock_until = None
         post.lock_worker_id = None
+        post.telegram_message_id = None
+        post.telegram_url = None
+        post.published_at = None
+        if retryable:
+            post.planned_at = now + timedelta(seconds=max(30, retry_after_seconds))
         if error_message:
             post.post_text = f"{post.post_text}\n\n[publication_error]: {error_message}"
-        post.updated_at = utcnow()
+        post.updated_at = now
         session.flush()
         return post
 

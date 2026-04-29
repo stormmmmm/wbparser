@@ -50,11 +50,16 @@ data/media_cache/*
 !data/media_cache/.gitkeep
 data/raw_cache/*
 !data/raw_cache/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+data/run/*
+!data/run/.gitkeep
 
 # maxapi PyMax session/work directories (per-account session.db etc.)
 maxapi-data/
 .maxapi-data/
 data/maxapi/
+data/maxapi_login_challenge.json
 
 # Admin state written by `wbpost login` — contains account_id/channel_id.
 # Ok to keep locally but never commit it.

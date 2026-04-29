@@ -24,13 +24,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json as _json
+import mimetypes
 import os
 import re
+import shutil
 import time as _time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+
+import httpx
 
 from api.backends.protocol import (
     LoginChallengeData,
@@ -413,7 +419,10 @@ class PyMaxBackend(MaxBackend):
         new_dir = self.work_dir / account_id
         if old_dir.exists() and not new_dir.exists():
             new_dir.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(old_dir, new_dir)
+            try:
+                os.replace(old_dir, new_dir)
+            except OSError:
+                shutil.move(str(old_dir), str(new_dir))
         phone = pending.get("phone", "")
         # Persist a minimal manifest so we can resume the session on the next
         # gateway restart without forcing the user through SMS again.
@@ -452,7 +461,7 @@ class PyMaxBackend(MaxBackend):
             display_name = "MAX user"
             if manifest_path.exists():
                 try:
-                    raw = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                    raw = _json.loads(manifest_path.read_text(encoding="utf-8-sig"))
                     phone = raw.get("phone") or ""
                     display_name = raw.get("display_name") or display_name
                 except (OSError, ValueError):
@@ -585,28 +594,66 @@ class PyMaxBackend(MaxBackend):
         for item in media:
             attachment_meta = item.attachment or {}
             local_path = attachment_meta.get("local_path") if attachment_meta else None
-            remote_url = attachment_meta.get("remote_url") if attachment_meta else None
-            # PyMax's Photo/Video/File classes accept ``path=`` for local files
-            # and ``url=`` for remote ones (the first positional argument is
-            # raw bytes — passing a path string there silently fails when the
-            # client tries to upload).
+            remote_url = (
+                attachment_meta.get("remote_url") if attachment_meta else None
+            ) or item.url
+            # Materialize remote URLs first so ReadyPost media refs without
+            # backend attachment metadata still produce real MAX attachments.
             kwargs: dict[str, Any] = {}
             if local_path:
                 kwargs["path"] = local_path
             elif remote_url:
-                kwargs["url"] = remote_url
+                kwargs["path"] = await self._download_remote_media(
+                    session, item, remote_url
+                )
             else:
                 continue
             try:
                 if item.type is MediaType.image:
                     attachments.append(pymax.Photo(**kwargs))
                 elif item.type is MediaType.video:
-                    attachments.append(pymax.Video(**kwargs))
+                    video_cls = getattr(pymax, "Video", pymax.File)
+                    attachments.append(video_cls(**kwargs))
                 else:
                     attachments.append(pymax.File(**kwargs))
-            except Exception:  # noqa: BLE001 - skip incompatible items
-                continue
+            except Exception as exc:  # noqa: BLE001
+                raise ServiceUnavailableError(
+                    f"MAX attachment preparation failed: {exc}",
+                    code="attachment_prepare_failed",
+                ) from exc
         return attachments
+
+    async def _download_remote_media(
+        self,
+        session: _Session,
+        item: UpstreamMedia,
+        url: str,
+    ) -> str:
+        cache_dir = session.work_dir / "media_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(urlparse(url).path).suffix.lower()
+        if not suffix:
+            suffix = mimetypes.guess_extension(item.mime_type or "") or ".jpg"
+        target = cache_dir / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()[:24]}{suffix}"
+        if target.exists() and target.stat().st_size > 0:
+            return str(target)
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=30.0,
+                trust_env=True,
+            ) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+            target.write_bytes(response.content)
+        except Exception as exc:  # noqa: BLE001
+            with contextlib.suppress(OSError):
+                target.unlink()
+            raise ServiceUnavailableError(
+                f"Failed to materialize remote media: {exc}",
+                code="media_download_failed",
+            ) from exc
+        return str(target)
 
     async def _upload_attachments(
         self, session: _Session, items: list[Any]

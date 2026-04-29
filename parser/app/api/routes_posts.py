@@ -37,7 +37,7 @@ def _is_post_fresh(session: Session, post: Post) -> bool:
     for _, product in rows:
         if not product.availability:
             return False
-        if _as_utc(product.last_checked_at) < freshness_cutoff:
+        if post.planned_at is None and _as_utc(product.last_checked_at) < freshness_cutoff:
             return False
     return True
 
@@ -46,9 +46,12 @@ def _is_post_fresh(session: Session, post: Post) -> bool:
 def get_next_posts(
     limit: int = 1,
     post_type: str | None = None,
+    include_unplanned: bool = True,
     session: Session = Depends(get_session),
 ) -> list[ReadyPost]:
     ready_posts = Repository.get_next_ready_posts(session, limit=max(1, limit), post_type=post_type)
+    if not include_unplanned:
+        ready_posts = [post for post in ready_posts if post.planned_at is not None]
     result: list[ReadyPost] = []
     for post in ready_posts:
         if not _is_post_fresh(session, post):
@@ -110,6 +113,7 @@ def mark_failed(
         post_id=post_id,
         retryable=payload.retryable,
         error_message=f"{payload.error_code}: {payload.error_message}",
+        retry_after_seconds=payload.retry_after_seconds,
     )
     if post is None:
         session.rollback()

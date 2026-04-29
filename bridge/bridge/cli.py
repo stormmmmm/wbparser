@@ -79,6 +79,7 @@ def cmd_run_once(
                 lock_ttl_seconds=settings.lock_ttl_seconds,
                 batch_size=settings.batch_size,
                 post_type=post_type,
+                include_unplanned=settings.publish_unplanned_posts,
             )
         finally:
             await parser_http.aclose()
@@ -118,6 +119,7 @@ def cmd_run_loop() -> None:
                 lock_ttl_seconds=settings.lock_ttl_seconds,
                 batch_size=settings.batch_size,
                 poll_interval_seconds=settings.poll_interval_seconds,
+                include_unplanned=settings.publish_unplanned_posts,
                 stop_event=stop_event,
             )
         finally:

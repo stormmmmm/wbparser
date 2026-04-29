@@ -22,6 +22,7 @@ class PostFailedIn(BaseModel):
     error_code: str
     error_message: str
     retryable: bool = True
+    retry_after_seconds: int = 300
 
 
 class PostMetricsIn(BaseModel):

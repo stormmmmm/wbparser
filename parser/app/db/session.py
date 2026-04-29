@@ -42,6 +42,8 @@ def get_sessionmaker(database_url: str | None = None) -> sessionmaker[Session]:
 
 
 def init_db(database_url: str | None = None) -> None:
+    import app.db.models  # noqa: F401
+
     engine = get_engine(database_url)
     Base.metadata.create_all(bind=engine)
 

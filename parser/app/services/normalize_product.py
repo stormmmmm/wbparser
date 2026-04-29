@@ -27,6 +27,60 @@ def _price_to_rub(value: Any, from_minor_units: bool = False) -> int | None:
     return parsed
 
 
+def _wb_basket_number(article_id: int) -> int:
+    vol = article_id // 100000
+    ranges = [
+        (143, 1),
+        (287, 2),
+        (431, 3),
+        (719, 4),
+        (1007, 5),
+        (1061, 6),
+        (1115, 7),
+        (1169, 8),
+        (1313, 9),
+        (1601, 10),
+        (1655, 11),
+        (1919, 12),
+        (2045, 13),
+        (2189, 14),
+        (2405, 15),
+        (2621, 16),
+        (2837, 17),
+        (3053, 18),
+        (3269, 19),
+        (3485, 20),
+        (3701, 21),
+        (3917, 22),
+        (4133, 23),
+        (4349, 24),
+        (4565, 25),
+        (4781, 26),
+        (4997, 27),
+        (5213, 28),
+    ]
+    for upper, basket in ranges:
+        if vol <= upper:
+            return basket
+    return 29
+
+
+def _wb_image_urls(article_id: str, pics: Any) -> list[str]:
+    count = _to_int(pics)
+    if not count:
+        return []
+    nm = _to_int(article_id)
+    if nm is None:
+        return []
+    basket = _wb_basket_number(nm)
+    vol = nm // 100000
+    part = nm // 1000
+    return [
+        f"https://basket-{basket:02d}.wbbasket.ru/vol{vol}/part{part}/{nm}/images/big/{idx}.webp"
+        for idx in range(1, count + 1)
+    ]
+
+
 def _extract_images(raw: dict[str, Any]) -> list[str]:
     image_urls: list[str] = []
     for key in ("image_urls", "images", "photos", "photoUrls", "pics"):
@@ -40,6 +94,10 @@ def _extract_images(raw: dict[str, Any]) -> list[str]:
                         if item.get(image_key):
                             image_urls.append(str(item[image_key]))
                             break
+        elif key == "pics":
+            article_id = extract_article_id(raw.get("id") or raw.get("nmId") or raw.get("article"))
+            if article_id:
+                image_urls.extend(_wb_image_urls(article_id, value))
     return [url for url in dedupe_strings(image_urls) if url.startswith("http")]
 
 
@@ -97,6 +155,13 @@ def normalize_wb_product(
     old_price_u = raw.get("priceU")
     sale_price = raw.get("salePrice") if sale_price_u is None else None
     base_price = raw.get("price") if old_price_u is None else None
+    if sale_price_u is None and old_price_u is None:
+        sizes = raw.get("sizes")
+        if isinstance(sizes, list) and sizes:
+            size_price = sizes[0].get("price") if isinstance(sizes[0], dict) else None
+            if isinstance(size_price, dict):
+                sale_price_u = size_price.get("product")
+                old_price_u = size_price.get("basic")
 
     price = _price_to_rub(sale_price_u, from_minor_units=True) if sale_price_u else _price_to_rub(sale_price)
     old_price = _price_to_rub(old_price_u, from_minor_units=True) if old_price_u else _price_to_rub(base_price)
@@ -129,7 +194,10 @@ def normalize_wb_product(
     url = raw.get("link") or raw.get("url") or source_url or build_canonical_wb_url(article_id)
     canonical_url = canonicalize_wb_url(url) or build_canonical_wb_url(article_id)
 
-    quantity = _to_int(raw.get("totalQuantity") or raw.get("quantity"))
+    quantity_source = raw.get("totalQuantity")
+    if quantity_source is None:
+        quantity_source = raw.get("quantity")
+    quantity = _to_int(quantity_source)
     availability = bool(raw.get("available", True))
     if quantity is not None:
         availability = quantity > 0

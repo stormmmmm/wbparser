@@ -16,6 +16,7 @@ try:  # py>=3.9
 except ImportError:  # pragma: no cover
     ZoneInfo = None  # type: ignore[assignment]
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -80,6 +81,16 @@ def _slot_to_utc(target_date: date_type, slot_time: str, tz_name: str) -> dateti
     return local.astimezone(timezone.utc)
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _db_datetime(value: datetime) -> datetime:
+    return _as_utc(value).replace(tzinfo=None)
+
+
 class DailyPlannerService:
     """Stateless service that assigns ``planned_at`` for tomorrow (or any date)."""
 
@@ -125,6 +136,20 @@ class DailyPlannerService:
         for slot in slots:
             slot_at_utc = _slot_to_utc(target_date, slot.time, tz_name)
             slot_plan = SlotPlan(slot=slot, planned_at=slot_at_utc)
+            existing = session.scalar(
+                select(Post)
+                .where(Post.post_type == slot.type)
+                .where(Post.planned_at == _db_datetime(slot_at_utc))
+                .where(Post.publication_status.in_(("ready", "locked", "published")))
+                .order_by(Post.created_at.asc())
+                .limit(1)
+            )
+            if existing is not None:
+                slot_plan.post_id = existing.id
+                used_ids.add(existing.id)
+                plan.slots.append(slot_plan)
+                continue
+
             pool = collections if slot.type == "collection" else singles
 
             chosen: Post | None = None
@@ -145,6 +170,9 @@ class DailyPlannerService:
                 continue
 
             Repository.assign_planned_at(session, chosen.id, slot_at_utc)
+            fresh_until = slot_at_utc + timedelta(minutes=self.settings.POST_REVALIDATE_MINUTES)
+            if _as_utc(chosen.fresh_until) < fresh_until:
+                chosen.fresh_until = fresh_until
             slot_plan.post_id = chosen.id
             used_ids.add(chosen.id)
             plan.slots.append(slot_plan)
