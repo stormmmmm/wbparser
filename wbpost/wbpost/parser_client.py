@@ -53,6 +53,8 @@ class ParserClient:
         date: str | None = None,
         slots: list[dict[str, Any]] | None = None,
         timezone: str | None = None,
+        posting_minute_spread: tuple[int, int] | None = None,
+        minute_spread: tuple[int, int] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {}
         if date is not None:
@@ -61,6 +63,11 @@ class ParserClient:
             body["slots"] = slots
         if timezone is not None:
             body["timezone"] = timezone
+        effective_spread = (
+            posting_minute_spread if posting_minute_spread is not None else minute_spread
+        )
+        if effective_spread is not None:
+            body["posting_minute_spread"] = list(effective_spread)
         resp = self._client.post("/api/v1/admin/plan-day", json=body)
         self._raise_for(resp)
         return resp.json()
@@ -78,8 +85,25 @@ class ParserClient:
         self._raise_for(resp)
         return resp.json()
 
-    def daily_cycle(self) -> dict[str, Any]:
-        resp = self._client.post("/api/v1/admin/daily-cycle", json={})
+    def daily_cycle(
+        self,
+        *,
+        slots: list[dict[str, Any]] | None = None,
+        timezone: str | None = None,
+        posting_minute_spread: tuple[int, int] | None = None,
+        minute_spread: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {}
+        if slots is not None:
+            body["slots"] = slots
+        if timezone is not None:
+            body["timezone"] = timezone
+        effective_spread = (
+            posting_minute_spread if posting_minute_spread is not None else minute_spread
+        )
+        if effective_spread is not None:
+            body["posting_minute_spread"] = list(effective_spread)
+        resp = self._client.post("/api/v1/admin/daily-cycle", json=body)
         self._raise_for(resp)
         return resp.json()
 

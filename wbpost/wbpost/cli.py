@@ -114,7 +114,12 @@ def plan_day_cmd(
     slots = [s.model_dump() for s in cfg.schedule.slots]
     with ParserClient(cfg.deployment.parser_url) as parser:
         try:
-            result = parser.plan_day(date=date, slots=slots, timezone=cfg.schedule.timezone)
+            result = parser.plan_day(
+                date=date,
+                slots=slots,
+                timezone=cfg.schedule.timezone,
+                posting_minute_spread=cfg.schedule.posting_minute_spread,
+            )
         except ParserError as exc:
             typer.echo(f"parser error: {exc} body={exc.body}", err=True)
             raise typer.Exit(code=2) from exc
@@ -144,9 +149,14 @@ def daily_cycle_cmd(
 ) -> None:
     """Запустить полный ежедневный цикл: collect → score → build → plan-day."""
     cfg, _ = _resolve_config(config)
+    slots = [s.model_dump() for s in cfg.schedule.slots]
     with ParserClient(cfg.deployment.parser_url) as parser:
         try:
-            result = parser.daily_cycle()
+            result = parser.daily_cycle(
+                slots=slots,
+                timezone=cfg.schedule.timezone,
+                posting_minute_spread=cfg.schedule.posting_minute_spread,
+            )
         except ParserError as exc:
             typer.echo(f"parser error: {exc} body={exc.body}", err=True)
             raise typer.Exit(code=2) from exc

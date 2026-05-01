@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_PATH = Path("admin.yml")
 ENV_PREFIX = "WBPOST_"
@@ -47,6 +47,12 @@ class ScheduleSlot(BaseModel):
 class ScheduleConfig(BaseModel):
     timezone: str = "Europe/Moscow"
     enabled: bool = True
+    posting_minute_spread: tuple[int, int] = Field(
+        default=(0, 0),
+        validation_alias=AliasChoices(
+            "posting_minute_spread", "minute_spread", "разброс"
+        ),
+    )
     slots: list[ScheduleSlot] = Field(
         default_factory=lambda: [
             ScheduleSlot(time="10:00", type="collection"),
@@ -56,6 +62,44 @@ class ScheduleConfig(BaseModel):
             ScheduleSlot(time="19:00", type="single"),
         ]
     )
+
+    @field_validator("posting_minute_spread", mode="before")
+    @classmethod
+    def _validate_minute_spread(cls, value: object) -> tuple[int, int]:
+        if value in (None, ""):
+            return (0, 0)
+
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",")]
+            if len(parts) != 2:
+                raise ValueError(
+                    "posting_minute_spread must contain two integers, e.g. '0, 15'"
+                )
+            try:
+                left, right = int(parts[0]), int(parts[1])
+            except ValueError as exc:
+                raise ValueError(
+                    "posting_minute_spread must contain integers, e.g. '0, 15'"
+                ) from exc
+        elif isinstance(value, (list, tuple)):
+            if len(value) != 2:
+                raise ValueError("posting_minute_spread must contain exactly two values")
+            try:
+                left, right = int(value[0]), int(value[1])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("posting_minute_spread must contain integer values") from exc
+        else:
+            raise ValueError(
+                "posting_minute_spread must be 'min,max' string or [min, max] list"
+            )
+
+        if left < 0 or right < 0:
+            raise ValueError("posting_minute_spread values must be >= 0")
+        if left > right:
+            raise ValueError("posting_minute_spread min cannot be greater than max")
+        if right > 59:
+            raise ValueError("posting_minute_spread max cannot exceed 59")
+        return (left, right)
 
 
 class AffiliateConfig(BaseModel):

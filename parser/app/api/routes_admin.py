@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import date as date_type
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -33,6 +33,31 @@ class PlanDayIn(BaseModel):
     date: str | None = Field(None, description="YYYY-MM-DD; default = tomorrow in tz")
     timezone: str = DEFAULT_TIMEZONE
     slots: list[SlotPayload]
+    posting_minute_spread: tuple[int, int] = Field(
+        default=(0, 0),
+        validation_alias=AliasChoices("posting_minute_spread", "minute_spread"),
+        description="Inclusive minute offset range [min, max], e.g. [0, 15]",
+    )
+
+    @field_validator("posting_minute_spread", mode="before")
+    @classmethod
+    def _validate_minute_spread(cls, value: object) -> tuple[int, int]:
+        return _parse_minute_spread(value)
+
+
+class DailyCycleIn(BaseModel):
+    timezone: str = DEFAULT_TIMEZONE
+    slots: list[SlotPayload] | None = None
+    posting_minute_spread: tuple[int, int] = Field(
+        default=(0, 0),
+        validation_alias=AliasChoices("posting_minute_spread", "minute_spread"),
+        description="Inclusive minute offset range [min, max], e.g. [0, 15]",
+    )
+
+    @field_validator("posting_minute_spread", mode="before")
+    @classmethod
+    def _validate_minute_spread(cls, value: object) -> tuple[int, int]:
+        return _parse_minute_spread(value)
 
 
 class PostOnceIn(BaseModel):
@@ -46,6 +71,35 @@ def _parse_date(raw: str | None) -> date_type | None:
     return date_type.fromisoformat(raw)
 
 
+def _parse_minute_spread(value: object) -> tuple[int, int]:
+    if value in (None, ""):
+        return (0, 0)
+
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",")]
+        if len(parts) != 2:
+            raise ValueError(
+                "posting_minute_spread must contain two integers, e.g. '0, 15'"
+            )
+        left, right = int(parts[0]), int(parts[1])
+    elif isinstance(value, (list, tuple)):
+        if len(value) != 2:
+            raise ValueError("posting_minute_spread must contain exactly two values")
+        left, right = int(value[0]), int(value[1])
+    else:
+        raise ValueError(
+            "posting_minute_spread must be 'min,max' string or [min, max] list"
+        )
+
+    if left < 0 or right < 0:
+        raise ValueError("posting_minute_spread values must be >= 0")
+    if left > right:
+        raise ValueError("posting_minute_spread min cannot be greater than max")
+    if right > 59:
+        raise ValueError("posting_minute_spread max cannot exceed 59")
+    return (left, right)
+
+
 @router.post("/plan-day")
 def plan_day(payload: PlanDayIn, session: Session = Depends(get_session)) -> dict:
     settings = get_settings()
@@ -54,7 +108,13 @@ def plan_day(payload: PlanDayIn, session: Session = Depends(get_session)) -> dic
     target = _parse_date(payload.date)
     spec = [SlotSpec(**slot.model_dump()) for slot in payload.slots]
     planner = DailyPlannerService(settings)
-    plan = planner.plan_day(session, spec, target_date=target, tz_name=payload.timezone)
+    plan = planner.plan_day(
+        session,
+        spec,
+        target_date=target,
+        tz_name=payload.timezone,
+        minute_spread=payload.posting_minute_spread,
+    )
     session.commit()
     return plan.to_dict()
 
@@ -103,7 +163,11 @@ def post_once(payload: PostOnceIn, session: Session = Depends(get_session)) -> d
 
 
 @router.post("/daily-cycle")
-def daily_cycle(session: Session = Depends(get_session)) -> dict:
+def daily_cycle(
+    payload: DailyCycleIn | None = Body(default=None),
+    session: Session = Depends(get_session),
+) -> dict:
+    payload = payload or DailyCycleIn()
     settings = get_settings()
     collector = CandidateCollectorService(settings)
     scorer = ScoringService(settings)
@@ -123,7 +187,16 @@ def daily_cycle(session: Session = Depends(get_session)) -> dict:
         SlotSpec(time="16:00", type="collection"),
         SlotSpec(time="19:00", type="single"),
     ]
-    plan = planner.plan_day(session, default_slots)
+    if payload.slots is None:
+        slots = default_slots
+    else:
+        slots = [SlotSpec(**slot.model_dump()) for slot in payload.slots]
+    plan = planner.plan_day(
+        session,
+        slots,
+        tz_name=payload.timezone,
+        minute_spread=payload.posting_minute_spread,
+    )
     session.commit()
     return {
         "collected": collected,

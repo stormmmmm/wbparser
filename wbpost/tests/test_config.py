@@ -47,10 +47,34 @@ def test_env_override_can_set_nested_key(tmp_path, monkeypatch):
     assert cfg.schedule.enabled is False
 
 
+def test_posting_minute_spread_supports_new_english_key(tmp_path):
+    _write_yaml(tmp_path / "admin.yml", {"schedule": {"posting_minute_spread": "0, 15"}})
+    cfg = load_admin_config(tmp_path / "admin.yml")
+    assert cfg.schedule.posting_minute_spread == (0, 15)
+
+
+def test_posting_minute_spread_supports_legacy_russian_key(tmp_path):
+    _write_yaml(tmp_path / "admin.yml", {"schedule": {"разброс": "3, 9"}})
+    cfg = load_admin_config(tmp_path / "admin.yml")
+    assert cfg.schedule.posting_minute_spread == (3, 9)
+
+
+def test_posting_minute_spread_supports_legacy_minute_spread_key(tmp_path):
+    _write_yaml(tmp_path / "admin.yml", {"schedule": {"minute_spread": [3, 9]}})
+    cfg = load_admin_config(tmp_path / "admin.yml")
+    assert cfg.schedule.posting_minute_spread == (3, 9)
+
+
 def test_invalid_slot_format_rejected(tmp_path):
     _write_yaml(
         tmp_path / "admin.yml",
         {"schedule": {"slots": [{"time": "25:00", "type": "single"}]}},
     )
+    with pytest.raises(Exception):
+        load_admin_config(tmp_path / "admin.yml")
+
+
+def test_invalid_posting_minute_spread_rejected(tmp_path):
+    _write_yaml(tmp_path / "admin.yml", {"schedule": {"posting_minute_spread": [15, 5]}})
     with pytest.raises(Exception):
         load_admin_config(tmp_path / "admin.yml")

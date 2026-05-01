@@ -158,6 +158,42 @@ def test_plan_day_reuses_existing_slot_assignment():
     assert assigned == [first.slots[0].post_id]
 
 
+def test_plan_day_applies_minute_spread_and_stays_deterministic():
+    settings = get_settings()
+    target = date(2026, 5, 1)
+    slot = SlotSpec(time="10:00", type="collection")
+    with session_scope() as session:
+        _make_ready_post(session, post_id="c-1", post_type="collection", article_id="100")
+        _make_ready_post(session, post_id="c-2", post_type="collection", article_id="101")
+
+    planner = DailyPlannerService(settings)
+    with session_scope() as session:
+        first = planner.plan_day(
+            session,
+            [slot],
+            target_date=target,
+            tz_name="Europe/Moscow",
+            minute_spread=(0, 15),
+        )
+    with session_scope() as session:
+        second = planner.plan_day(
+            session,
+            [slot],
+            target_date=target,
+            tz_name="Europe/Moscow",
+            minute_spread=(0, 15),
+        )
+
+    first_slot = first.slots[0]
+    second_slot = second.slots[0]
+    base = _slot_to_utc(target, slot.time, "Europe/Moscow")
+    delta_minutes = int((first_slot.planned_at - base).total_seconds() // 60)
+
+    assert 0 <= delta_minutes <= 15
+    assert second_slot.planned_at == first_slot.planned_at
+    assert second_slot.post_id == first_slot.post_id
+
+
 def test_plan_day_skips_when_pool_empty():
     settings = get_settings()
     with session_scope() as session:

@@ -7,6 +7,7 @@ so that bridge will only pick it up once its slot has arrived.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import date as date_type
 from datetime import datetime, time, timedelta, timezone
@@ -81,6 +82,37 @@ def _slot_to_utc(target_date: date_type, slot_time: str, tz_name: str) -> dateti
     return local.astimezone(timezone.utc)
 
 
+def _normalize_minute_spread(minute_spread: tuple[int, int]) -> tuple[int, int]:
+    left, right = int(minute_spread[0]), int(minute_spread[1])
+    if left < 0 or right < 0:
+        raise ValueError("minute_spread values must be >= 0")
+    if left > right:
+        raise ValueError("minute_spread min cannot be greater than max")
+    if right > 59:
+        raise ValueError("minute_spread max cannot exceed 59")
+    return (left, right)
+
+
+def _deterministic_spread_minutes(
+    *,
+    target_date: date_type,
+    slot: SlotSpec,
+    tz_name: str,
+    minute_spread: tuple[int, int],
+    slot_index: int,
+) -> int:
+    left, right = _normalize_minute_spread(minute_spread)
+    if left == right:
+        return left
+    seed_source = (
+        f"{target_date.isoformat()}|{slot_index}|{slot.time}|{slot.type}|"
+        f"{int(slot.with_reaction_poll)}|{tz_name}|{left}|{right}"
+    )
+    digest = hashlib.sha256(seed_source.encode("utf-8")).digest()
+    span = right - left + 1
+    return left + (int.from_bytes(digest[:8], "big") % span)
+
+
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -103,9 +135,11 @@ class DailyPlannerService:
         slots: list[SlotSpec],
         target_date: date_type | None = None,
         tz_name: str = DEFAULT_TIMEZONE,
+        minute_spread: tuple[int, int] = (0, 0),
     ) -> DayPlan:
         if not slots:
             raise ValueError("slots must be non-empty")
+        minute_spread = _normalize_minute_spread(minute_spread)
 
         if target_date is None:
             now_local = utcnow().astimezone(_zone(tz_name))
@@ -133,8 +167,16 @@ class DailyPlannerService:
         # Track posts already chosen for this run to avoid double-assignment.
         used_ids: set[str] = set()
 
-        for slot in slots:
+        for slot_index, slot in enumerate(slots):
             slot_at_utc = _slot_to_utc(target_date, slot.time, tz_name)
+            spread_minutes = _deterministic_spread_minutes(
+                target_date=target_date,
+                slot=slot,
+                tz_name=tz_name,
+                minute_spread=minute_spread,
+                slot_index=slot_index,
+            )
+            slot_at_utc = slot_at_utc + timedelta(minutes=spread_minutes)
             slot_plan = SlotPlan(slot=slot, planned_at=slot_at_utc)
             existing = session.scalar(
                 select(Post)

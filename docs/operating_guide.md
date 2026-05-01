@@ -38,6 +38,7 @@ cp admin.yml.example admin.yml
 # - max.phone — твой номер MAX (если оставить пустым, возьмётся из env PHONE_NUMBER)
 # - max.channel_name — "Поищи на WB" по умолчанию
 # - schedule.slots — сетка слотов; редактируй здесь, если хочешь другие часы
+# - schedule.posting_minute_spread — минутный рандом в рамках слота, например "0, 15"
 ```
 
 ### 1.2. Подними сервисы
